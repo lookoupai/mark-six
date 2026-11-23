@@ -440,6 +440,7 @@
                 <option value="hot" {% if strategy_filter == 'hot' %}selected{% endif %}>热门预测</option>
                 <option value="cold" {% if strategy_filter == 'cold' %}selected{% endif %}>冷门预测</option>
                 <option value="trend" {% if strategy_filter == 'trend' %}selected{% endif %}>走势预测</option>
+                <option value="zodiac_rebound" {% if strategy_filter == 'zodiac_rebound' %}selected{% endif %}>生肖遗漏回补</option>
                 <option value="hybrid" {% if strategy_filter == 'hybrid' %}selected{% endif %}>综合预测</option>
                 <option value="markov" {% if strategy_filter == 'markov' %}selected{% endif %}>马尔科夫预测</option>
                 <option value="ml" {% if strategy_filter == 'ml' %}selected{% endif %}>机器学习</option>
@@ -580,7 +581,9 @@
                                         <input type="checkbox" name="prediction_ids" value="{{ prediction.id }}" class="prediction-checkbox group-{{ group.key }}">
                                     </td>
                                     <td>
-                                        {% if prediction.strategy == 'ai' %}
+                                        {% if prediction.strategy == 'zodiac_rebound' %}
+                                            <span class="strategy-badge balanced-badge">生肖遗漏回补</span>
+                                        {% elif prediction.strategy == 'ai' %}
                                             <span class="strategy-badge ai-badge">AI</span>
                                         {% elif prediction.strategy == 'balanced' %}
                                             <span class="strategy-badge balanced-badge">均衡</span>

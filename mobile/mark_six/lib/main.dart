@@ -4205,6 +4205,7 @@ class _PredictScreenState extends State<PredictScreen> {
       widget.appState.user?.showNormalNumbers ?? false;
 
   final Map<String, String> _strategyLabels = const {
+    'zodiac_rebound': '生肖遗漏回补',
     'ml': '机器学习',
     'markov': '马尔科夫',
     'hybrid': '综合',
@@ -4228,6 +4229,7 @@ class _PredictScreenState extends State<PredictScreen> {
   }
 
   final Map<String, IconData> _strategyIcons = const {
+    'zodiac_rebound': Icons.pets,
     'ml': Icons.memory,
     'markov': Icons.account_tree,
     'hybrid': Icons.hub,
@@ -4502,6 +4504,9 @@ class _PredictScreenState extends State<PredictScreen> {
       actualSpecialZodiac: '',
       result: 'pending',
       createdAt: createdAt,
+      zodiacGroups: Map<String, dynamic>.from(
+        (result['model_meta'] as Map?)?['zodiac_rebound'] as Map? ?? {},
+      ),
     );
 
     setState(() {
@@ -4700,6 +4705,23 @@ class _PredictScreenState extends State<PredictScreen> {
   }
 
   Widget _buildPredictionNumbers() {
+    final meta = _result?['model_meta'];
+    final zodiacAnalysis = meta is Map ? meta['zodiac_rebound'] : null;
+    if (zodiacAnalysis is Map) {
+      final six = (zodiacAnalysis['six_zodiacs'] as List? ?? []).join(' · ');
+      final four = (zodiacAnalysis['four_zodiacs'] as List? ?? []).join(' · ');
+      return Column(
+        children: [
+          const Text('综合六肖'),
+          const SizedBox(height: 8),
+          Text(six, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          const Text('精选四肖'),
+          const SizedBox(height: 8),
+          Text(four, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        ],
+      );
+    }
     final normal = _uniqueNumbers(
       (_result?['normal'] as List<dynamic>? ?? [])
           .map((value) => value.toString())
@@ -5905,6 +5927,19 @@ class _PredictScreenState extends State<PredictScreen> {
             ],
           ),
           SizedBox(height: inlineSpecialOnly ? 7 : (showReferenceNumbers ? 12 : 10)),
+          if (item.zodiacGroups.isNotEmpty) ...[
+            for (final size in ['six', 'four'])
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  '${size == 'six' ? '六肖' : '四肖'}：'
+                  '${(item.zodiacGroups['${size}_zodiacs'] as List? ?? []).join('、')}'
+                  '${item.zodiacGroups['${size}_hit'] == null ? '' : item.zodiacGroups['${size}_hit'] == true ? ' ✓ 命中' : ' 未命中'}',
+                ),
+              ),
+            const Text('下方号码及通用统计为代表号码口径', style: TextStyle(fontSize: 11)),
+            const SizedBox(height: 8),
+          ],
           if (showReferenceNumbers) ...[
             Text(
               '平码参考',

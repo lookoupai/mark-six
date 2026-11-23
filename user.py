@@ -281,6 +281,7 @@ def _format_notification_item(item):
 
 
 STRATEGY_META = [
+    {"key": "zodiac_rebound", "label": "生肖遗漏回补", "icon": "🐾"},
     {"key": "hot", "label": "热门", "icon": "🔥"},
     {"key": "cold", "label": "冷门", "icon": "🧊"},
     {"key": "trend", "label": "走势", "icon": "📈"},
@@ -293,7 +294,7 @@ STRATEGY_META.insert(5, {"key": "markov", "label": "马尔科夫", "icon": "🔗
 STRATEGY_KEYS = [item["key"] for item in STRATEGY_META]
 AUTO_STRATEGY_META = [item for item in STRATEGY_META if item["key"] != "ai"]
 
-LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml"]
+LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "zodiac_rebound"]
 
 MARKOV_LEARNING_DEFAULT_CONFIG = {
     "window": 80,

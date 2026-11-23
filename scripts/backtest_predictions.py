@@ -13,6 +13,8 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from zodiac_rebound import summarize_groups
+
 try:
     from app import (
         app,
@@ -20,6 +22,7 @@ try:
         get_local_recommendations,
         _temporary_backtest_cutoff_period,
         _temporary_strict_backtest_strategy,
+        _evaluate_zodiac_groups,
     )
     from models import BacktestRun, LotteryDraw, db
 except ModuleNotFoundError as exc:
@@ -81,6 +84,7 @@ def _evaluate_prediction(result, draw):
         "zodiac_hit": zodiac_hit,
         "predicted_special": predicted_special,
         "actual_special": actual_special,
+        **_evaluate_zodiac_groups(result, draw),
     }
 
 
@@ -142,6 +146,7 @@ def _summarize_strategy(entries):
     zodiac = sum(1 for item in entries if item["zodiac_hit"])
     return {
         "total": total,
+        **summarize_groups(entries),
         "top1_hit_rate": round(top1 / total * 100, 2),
         "top6_hit_rate": round(top6 / total * 100, 2),
         "zodiac_hit_rate": round(zodiac / total * 100, 2),
@@ -164,7 +169,7 @@ def _resolve_strategy(strategy, history_desc, region):
 def _strategy_min_history(strategy, requested_minimum):
     # Keep CLI results aligned with production windows.  This script cannot
     # fairly score a model before its principal history window is available.
-    required = {"ml": 120, "markov": 80}.get(strategy, requested_minimum)
+    required = {"ml": 120, "markov": 80, "zodiac_rebound": 20}.get(strategy, requested_minimum)
     return max(int(requested_minimum or 1), required)
 
 
@@ -202,6 +207,8 @@ def run_backtest(region, strategies, min_history=60, limit=None):
                 with _temporary_backtest_cutoff_period(period):
                     with _temporary_strict_backtest_strategy():
                         result = get_local_recommendations(resolved_strategy, history_desc, region)
+                        if result.get("error"):
+                            raise ValueError(result["error"])
             except Exception as exc:
                 strategy_logs[strategy].append({
                     "period": period,
@@ -222,6 +229,7 @@ def run_backtest(region, strategies, min_history=60, limit=None):
                 "exact_hit": evaluation["exact_hit"],
                 "top6_hit": evaluation["top6_hit"],
                 "zodiac_hit": evaluation["zodiac_hit"],
+                **{key: value for key, value in evaluation.items() if "_zodiac_" in key},
             }
             strategy_logs[strategy].append(row)
             detailed_rows.append(row)

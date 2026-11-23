@@ -43,8 +43,8 @@ from security_policy import (
 
 mobile_api_bp = Blueprint("mobile_api", __name__, url_prefix="/api/mobile")
 
-STRATEGY_KEYS = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "ai"]
-LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml"]
+STRATEGY_KEYS = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "ai", "zodiac_rebound"]
+LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "zodiac_rebound"]
 _RED_BALLS = {1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46}
 _BLUE_BALLS = {3, 4, 9, 10, 14, 15, 20, 25, 26, 31, 36, 37, 41, 42, 47, 48}
 _RATE_LIMITS = {}
@@ -2114,6 +2114,8 @@ def api_predictions():
             if record.created_at
             else None,
         }
+        if record.strategy == "zodiac_rebound":
+            item["zodiac_groups"] = record.zodiac_groups
         if include_details:
             item["prediction_text"] = _hydrate_mobile_prediction_text(record)
             item["prediction_metadata"] = _hydrate_mobile_prediction_metadata(record)

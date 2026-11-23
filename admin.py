@@ -213,6 +213,7 @@ LEARNING_PANEL_TERM_LABELS = {
 }
 
 PREDICTION_STRATEGY_LABELS = {
+    'zodiac_rebound': '生肖遗漏回补',
     'hot': '热门预测',
     'cold': '冷门预测',
     'trend': '走势预测',
