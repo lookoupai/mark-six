@@ -2441,6 +2441,9 @@ if _should_log_startup():
 # 香港数据API
 HK_DATA_SOURCE_URL = "https://api3.marksix6.net/lottery_api.php?type=hk"
 HK_NEXT_DRAW_TIME_URL = "https://api3.marksix6.net/"
+HK_HISTORY_DRAW_LIMIT = 60
+_hk_history_backfill_lock = threading.Lock()
+_hk_history_backfill_retry_after = 0.0
 
 # 香港赛马会官方数据源（bet.hkjc.com/ch/marksix/home 页面背后的 GraphQL 接口）
 HKJC_GRAPHQL_URL = os.environ.get(
@@ -2758,6 +2761,8 @@ def _normalize_hkjc_draw_record(record):
     except (TypeError, ValueError):
         return None
     all_numbers = numbers + [special]
+    if len(set(all_numbers)) != 7 or any(not 1 <= int(n) <= 49 for n in all_numbers):
+        return None
     wave = ",".join(_hkjc_number_color(n) for n in all_numbers) or ""
     draw_date = _parse_hkjc_date_part(record.get("drawDate"))
     return {
@@ -2822,14 +2827,14 @@ def _hkjc_graph_post(operation_name, variables):
     _hk_log(f"官方接口HTTP 200 耗时{elapsed_ms}ms op={operation_name}")
     return body.get("data") or {}
 
-def fetch_hk_results_from_hkjc(limit=12):
+def fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT):
     """从香港赛马会官方 GraphQL 接口拉取最近 N 期开奖结果；失败返回 []"""
     try:
         data = _hkjc_graph_post(
             "marksixResult",
             {"lastNDraw": int(limit), "startDate": None, "endDate": None, "drawType": "All"},
         )
-        draws = (data.get("lotteryDraws")) or []
+        draws = (data or {}).get("lotteryDraws") or []
         normalized = []
         for record in draws:
             if str(record.get("status", "")).lower() != "result":
@@ -3392,7 +3397,7 @@ def settle_pending_manual_bets(region, draw_id):
 def load_hk_data(force_refresh=False):
     """香港开奖数据：香港赛马会官方接口为增量权威来源，旧接口兜底，合并去重"""
     # 官方权威数据（最近 N 期，能反映停办/加场等官方调整），作为增量来源
-    official_data = fetch_hk_results_from_hkjc(limit=12)
+    official_data = fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT)
     _hk_log(f"官方数据源返回开奖记录: {len(official_data)} 条")
     _hk_log(f"旧接口拉全量历史 url={HK_DATA_SOURCE_URL}")
     try:
@@ -3411,7 +3416,7 @@ def load_hk_data(force_refresh=False):
             pass
         else:
             _hk_log(f"旧接口返回格式错误: {str(api_data)[:200]}")
-            return []
+            return official_data
         
         for record in api_data:
             raw_numbers_str = record.get("openCode", "").split(',')
@@ -10132,7 +10137,71 @@ def _predict_with_ml(data, region, variation_key=None):
         "model_meta": model_meta,
     }
 
-def _predict_zodiac_rebound(data):
+def _ensure_zodiac_prediction_history(data, region):
+    """Backfill missing HK history without moving the prediction's cutoff.
+
+    Backtests must use exactly their supplied training slice. Live requests can
+    use older DB draws (including the previous lunar year), then the official
+    source. Only missing, completed draws are persisted; existing draws and
+    already generated predictions are never rewritten here.
+    """
+    global _hk_history_backfill_retry_after
+    if (not data or region != "hk" or _backtest_strict_strategy_enabled()
+            or _current_backtest_cutoff_period()):
+        return data
+    primary = _merge_draw_history_desc(data)
+    if len(primary) >= 20:
+        return data
+    latest = primary[0] if primary else None
+    if not latest:
+        return data
+    cutoff_date = str(latest.get("date") or "")[:10]
+    next_date = (datetime.strptime(cutoff_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    cutoff_period = _period_sort_key(latest.get("id"))
+
+    def eligible(draws):
+        return [draw for draw in draws
+                if str(draw.get("date") or "")[:10] <= cutoff_date
+                and _period_sort_key(draw.get("id")) <= cutoff_period]
+
+    def local_history():
+        records = (LotteryDraw.query.filter_by(region="hk")
+                   .filter(LotteryDraw.draw_date < next_date)
+                   .order_by(LotteryDraw.draw_date.desc(), LotteryDraw.draw_id.desc())
+                   .limit(HK_HISTORY_DRAW_LIMIT).all())
+        return _merge_draw_history_desc(primary, eligible([r.to_dict() for r in records]))
+
+    history = local_history()
+    if len(history) >= 20:
+        return history
+    with _hk_history_backfill_lock:
+        # Another request may have filled the database while we waited.
+        history = local_history()
+        if len(history) >= 20 or time.monotonic() < _hk_history_backfill_retry_after:
+            return history
+        _hk_history_backfill_retry_after = time.monotonic() + 300
+        official = eligible(fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT))
+        known = {str(draw.get("id")) for draw in history}
+        # The source can include older draws outside our local query limit.
+        # Check those too so a history fill cannot overwrite an imported draw.
+        if official:
+            known.update(row.draw_id for row in LotteryDraw.query.filter_by(region="hk").filter(
+                LotteryDraw.draw_id.in_([str(draw["id"]) for draw in official])
+            ).all())
+        inserted = 0
+        for draw in official:
+            if str(draw.get("id")) not in known:
+                if LotteryDraw.save_draw("hk", draw):
+                    known.add(str(draw["id"]))
+                    inserted += 1
+        if inserted:
+            _clear_draw_dependent_caches("hk")
+        history = local_history()
+        _hk_log(f"预测历史补齐：新增 {inserted} 期，可用 {len(history)} 期")
+        return history
+
+
+def _predict_zodiac_rebound(data, region):
     from models import ZodiacSetting
 
     try:
@@ -10146,18 +10215,22 @@ def _predict_zodiac_rebound(data):
 
         if not data:
             raise ValueError("生肖遗漏回补需要至少 20 期完整开奖记录")
+        data = _ensure_zodiac_prediction_history(data, region)
         latest = max(data, key=_backtest_draw_sort_key)
         return build_zodiac_prediction(data, mapping_for_draw(latest), mapping_for_draw)
     except ValueError as exc:
         if _backtest_strict_strategy_enabled():
             raise
-        return {"error": str(exc), "error_type": "invalid_zodiac_history"}
+        message = str(exc)
+        if region == "hk" and "至少 20" in message:
+            message += "。这是历史数据不足，无需等待新开奖；请在后台「香港开奖数据导入」补充历史后重试。"
+        return {"error": message, "error_type": "invalid_zodiac_history"}
 
 
 def get_local_recommendations(strategy, data, region, variation_key=None):
     all_numbers = list(range(1, 50))
     if strategy == 'zodiac_rebound':
-        return _predict_zodiac_rebound(data)
+        return _predict_zodiac_rebound(data, region)
     if not data:
         return _build_default_baseline_prediction()
     elif strategy == 'ml':

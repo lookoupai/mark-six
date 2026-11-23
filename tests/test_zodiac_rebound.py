@@ -196,6 +196,120 @@ class ZodiacIntegrationTests(unittest.TestCase):
         cls.env.stop()
         cls.directory.cleanup()
 
+    def setUp(self):
+        from models import LotteryDraw
+        with self.app.app_context():
+            LotteryDraw.query.delete()
+            self.module.db.session.commit()
+        self.module._hk_history_backfill_retry_after = 0.0
+
+    def store_draws(self, draws, region="hk"):
+        from models import LotteryDraw
+        for draw in draws:
+            self.module.db.session.add(LotteryDraw(
+                region=region, draw_id=draw["id"], draw_date=draw["date"],
+                normal_numbers=",".join(draw["no"]), special_number=draw["sno"],
+                special_zodiac=draw.get("sno_zodiac", ""), raw_zodiac=draw.get("raw_zodiac", "")))
+        self.module.db.session.commit()
+
+    def test_hk_backfills_twelve_draws_without_future_data_or_overwriting(self):
+        from models import LotteryDraw
+        module = self.module
+        future = deepcopy(self.history[0])
+        future.update(id="2026326", date="2026-11-22")
+        with self.app.app_context(), patch.object(module, "_get_number_to_zodiac_map", return_value=MAPPING), \
+             patch.object(module, "fetch_hk_results_from_hkjc", return_value=[future] + self.history) as fetch:
+            self.store_draws(self.history[:12])
+            self.store_draws([future])
+            result = module.get_local_recommendations("zodiac_rebound", self.history[:12], "hk")
+            self.assertNotIn("error", result)
+            analysis = result["model_meta"]["zodiac_rebound"]
+            self.assertEqual(analysis["source_period"], self.history[0]["id"])
+            self.assertEqual(analysis["history_count"], 20)
+            self.assertEqual(analysis["four_zodiacs"], ["兔", "狗", "马", "鸡"])
+            fetch.assert_called_once_with(limit=60)
+            self.assertEqual(LotteryDraw.query.filter_by(region="hk").count(), 21)
+            existing = LotteryDraw.query.filter_by(draw_id=self.history[0]["id"], region="hk").one()
+            self.assertEqual(existing.raw_zodiac, self.history[0]["raw_zodiac"])
+            second = module.get_local_recommendations("zodiac_rebound", self.history[:12], "hk")
+            self.assertNotIn("error", second)
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_hk_can_use_earlier_lunar_year_but_not_macau_history(self):
+        module = self.module
+        history = deepcopy(self.history)
+        for i, draw in enumerate(history):
+            dt = datetime(2027, 2, 10) - timedelta(days=i)
+            draw.update(date=dt.strftime("%Y-%m-%d"), id=f"{dt.year}{150 - i:03d}")
+        with self.app.app_context(), patch.object(module, "_get_number_to_zodiac_map", return_value=MAPPING), \
+             patch.object(module, "fetch_hk_results_from_hkjc", return_value=[]) as fetch:
+            self.store_draws(history[4:])
+            result = module.get_local_recommendations("zodiac_rebound", history[:4], "hk")
+            self.assertNotIn("error", result)
+            self.assertEqual(result["model_meta"]["zodiac_rebound"]["history_count"], 20)
+            fetch.assert_not_called()
+            from models import LotteryDraw
+            LotteryDraw.query.delete()
+            module.db.session.commit()
+            self.store_draws(history, region="macau")
+            result = module.get_local_recommendations("zodiac_rebound", history[:4], "hk")
+            self.assertIn("当前仅 4 期", result["error"])
+
+    def test_hk_short_history_failure_is_actionable_and_throttled(self):
+        module = self.module
+        with self.app.app_context(), patch.object(module, "fetch_hk_results_from_hkjc", return_value=[]) as fetch, \
+             patch.object(module, "_get_number_to_zodiac_map", return_value=MAPPING):
+            self.store_draws(self.history[:12])
+            for _ in range(2):
+                result = module.get_local_recommendations("zodiac_rebound", self.history[:12], "hk")
+                self.assertIn("当前仅 12 期", result["error"])
+                self.assertIn("香港开奖数据导入", result["error"])
+            self.assertEqual(fetch.call_count, 1)
+            # Sufficient existing data and Macau requests do not call HK at all.
+            module.get_local_recommendations("zodiac_rebound", self.history, "hk")
+            module.get_local_recommendations("zodiac_rebound", self.history[:12], "macau")
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_backtest_short_history_never_backfills_from_database_or_network(self):
+        module = self.module
+        with self.app.app_context(), patch.object(module, "fetch_hk_results_from_hkjc") as fetch, \
+             patch.object(module, "_get_number_to_zodiac_map", return_value=MAPPING):
+            self.store_draws(self.history)
+            with module._temporary_strict_backtest_strategy(), self.assertRaisesRegex(ValueError, "当前仅 12"):
+                module.get_local_recommendations("zodiac_rebound", self.history[:12], "hk")
+            with module._temporary_backtest_cutoff_period("2026326"):
+                result = module.get_local_recommendations("zodiac_rebound", self.history[:12], "hk")
+                self.assertIn("当前仅 12", result["error"])
+            fetch.assert_not_called()
+
+    def test_hk_daily_sync_keeps_official_history_when_legacy_fails(self):
+        module = self.module
+        with patch.object(module, "fetch_hk_results_from_hkjc", return_value=self.history) as fetch, \
+             patch.object(module.requests, "get") as legacy:
+            legacy.side_effect = RuntimeError("legacy offline")
+            self.assertEqual(module.load_hk_data(), self.history)
+            fetch.assert_called_once_with(limit=60)
+            legacy.side_effect = None
+            legacy.return_value.json.return_value = "bad response format"
+            self.assertEqual(module.load_hk_data(), self.history)
+
+    def test_official_history_skips_incomplete_duplicate_or_invalid_balls(self):
+        module = self.module
+        valid = {"year": "2026", "no": 123, "drawDate": "2026-11-19+08:00", "status": "Result",
+                 "drawResult": {"drawnNo": [1, 2, 3, 4, 5, 6], "xDrawnNo": 7}}
+        invalid = []
+        for special in (None, 0, 50, 1):
+            draw = deepcopy(valid)
+            draw["drawResult"]["xDrawnNo"] = special
+            invalid.append(draw)
+        pending = deepcopy(valid)
+        pending["status"] = "Defined"
+        with patch.object(module, "_hkjc_graph_post", return_value={"lotteryDraws": [valid, pending] + invalid}) as graph:
+            records = module.fetch_hk_results_from_hkjc()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["id"], "2026123")
+            self.assertEqual(graph.call_args.args[1]["lastNDraw"], 60)
+
     def test_api_persistence_and_repeated_read(self):
         from models import User, PredictionRecord, SHARED_PREDICTION_USER_ID
         with self.app.app_context():
