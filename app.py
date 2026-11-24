@@ -1870,6 +1870,43 @@ def _prediction_notice_card_html(title, normal_numbers, special_number, special_
     '''
 
 
+def _prediction_notice_zodiac_groups(prediction):
+    """Use the selections saved with this prediction, never recompute history."""
+    if getattr(prediction, 'strategy', '') != 'zodiac_rebound':
+        return {}
+    metadata = _deserialize_prediction_metadata(getattr(prediction, 'prediction_metadata', ''))
+    analysis = metadata.get('zodiac_rebound') if isinstance(metadata, dict) else None
+    if not isinstance(analysis, dict):
+        return {}
+    groups = {}
+    for size, count in (('six', 6), ('four', 4)):
+        raw = analysis.get(f'{size}_zodiacs')
+        if not isinstance(raw, list) or len(raw) != count or len(set(map(str, raw))) != count:
+            return {}
+        if any(not isinstance(zodiac, str) or zodiac not in tuple('鼠牛虎兔龙蛇马羊猴鸡狗猪') for zodiac in raw):
+            return {}
+        groups[f'{size}_zodiacs'] = raw
+    if not set(groups['four_zodiacs']).issubset(groups['six_zodiacs']):
+        return {}
+    return groups
+
+
+def _prediction_notice_zodiac_card_html(title, groups, accent='#93c5fd'):
+    rows = ''.join(
+        f'<div style="margin:6px 0;color:#0f172a;">{label}：'
+        f'<strong>{escape("、".join(groups[f"{size}_zodiacs"]))}</strong></div>'
+        for size, label in (('six', '综合六肖'), ('four', '精选四肖'))
+    )
+    return f'''
+    <div class="notice-prediction-card" style="padding:14px 0;border-bottom:1px solid rgba(148,163,184,.18);">
+        <div class="notice-card-title" style="font-weight:800;color:{accent};font-size:15px;margin-bottom:8px;">{escape(title)}</div>
+        <div style="background:#f8fafc;padding:12px;border:1px solid #e2e8f0;border-radius:8px;">
+            {rows}
+        </div>
+    </div>
+    '''
+
+
 def _prediction_notice_email_style():
     return '''
     <style>
@@ -14241,6 +14278,7 @@ WINNING_SNAPSHOT_FIELDS = (
     'special_zodiac',
     'actual_special_number',
     'actual_special_zodiac',
+    'prediction_metadata',
 )
 
 
@@ -15541,6 +15579,22 @@ def send_combined_prediction_email(user, predictions, region, period, latest_dra
     text_rows = []
     for pred in predictions:
         strategy_name = _get_email_strategy_display(pred)
+        groups = _prediction_notice_zodiac_groups(pred)
+        if getattr(pred, 'strategy', '') == 'zodiac_rebound':
+            if groups:
+                text_rows.append(
+                    f"{strategy_name}:\n综合六肖：{'、'.join(groups['six_zodiacs'])}\n"
+                    f"精选四肖：{'、'.join(groups['four_zodiacs'])}"
+                )
+                cards_html += _prediction_notice_zodiac_card_html(strategy_name, groups)
+            else:
+                text_rows.append(f"{strategy_name}: 该历史记录未保存完整六肖、四肖，无法展示组合。")
+                cards_html += (
+                    '<div class="notice-prediction-card" style="padding:14px 0;">'
+                    f'<strong>{escape(strategy_name)}</strong>'
+                    '<p>该历史记录未保存完整六肖、四肖，无法展示组合。</p></div>'
+                )
+            continue
         if show_normal_numbers:
             text_rows.append(
                 f"{strategy_name}: 平码 {pred.normal_numbers}; 特码 {pred.special_number} ({pred.special_zodiac})"
@@ -15619,6 +15673,15 @@ def send_combined_winning_email(user, predictions, region, draw_data=None):
     text_rows = []
     for pred in predictions:
         strategy_name = _get_email_strategy_display(pred)
+        groups = _prediction_notice_zodiac_groups(pred)
+        if groups:
+            text_rows.append(
+                f"{strategy_name}: 代表号码命中特码 {pred.special_number} ({pred.special_zodiac})；"
+                f"综合六肖：{'、'.join(groups['six_zodiacs'])}；"
+                f"精选四肖：{'、'.join(groups['four_zodiacs'])}"
+            )
+            cards_html += _prediction_notice_zodiac_card_html(strategy_name, groups, accent='#16a34a')
+            continue
         text_rows.append(f"{strategy_name}: 命中特码 {pred.special_number} ({pred.special_zodiac})")
         cards_html += _prediction_notice_card_html(
             strategy_name,

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import importlib
 import os
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -400,6 +401,67 @@ class ZodiacIntegrationTests(unittest.TestCase):
             for invalid in ("broken", '[]', '{"zodiac_rebound":null}'):
                 record.prediction_metadata = invalid
                 self.assertEqual(record.zodiac_groups, {})
+
+    def test_zodiac_groups_reach_station_email_and_telegram(self):
+        from models import User, PredictionRecord, UserNotification
+        import notification_service
+        result = build_prediction(self.history, MAPPING)
+        prediction = PredictionRecord(
+            strategy="zodiac_rebound", region="macau", period="2026326",
+            normal_numbers=",".join(map(str, result["normal"])),
+            special_number=result["special"]["number"], special_zodiac=result["special"]["sno_zodiac"],
+            prediction_metadata=self.module._serialize_prediction_metadata(result["model_meta"]),
+        )
+        normal = SimpleNamespace(strategy="hot", normal_numbers="1,2,3,4,5,6", special_number="42", special_zodiac="牛")
+        config = {"station_enabled": True, "email_enabled": True, "telegram_enabled": True,
+                  "telegram_bot_token": "test-only-token", "telegram_chat_id": "-1001234567890"}
+        with self.app.app_context(), \
+             patch.object(notification_service, "get_user_notification_config", return_value=config), \
+             patch.object(notification_service, "send_html_email") as email, \
+             patch.object(notification_service.requests, "post") as post, \
+             patch.object(self.module, "_get_number_to_zodiac_map", return_value=MAPPING):
+            user = User(username="notification-test", email="notice@example.test", password_hash="unused", is_active=True)
+            self.module.db.session.add(user)
+            self.module.db.session.commit()
+            for show_normal in (False, True):
+                with self.subTest(show_normal=show_normal):
+                    user.show_normal_numbers = show_normal
+                    self.module.send_combined_prediction_email(user, [prediction, normal], "macau", "2026326")
+                    telegram_text = post.call_args.kwargs["json"]["text"]
+                    email_html = email.call_args.args[2]
+                    notice = UserNotification.query.filter_by(user_id=user.id).order_by(UserNotification.id.desc()).first()
+                    for content in (telegram_text, email_html, notice.content):
+                        self.assertIn("综合六肖", content)
+                        self.assertIn("兔、狗、牛、马、鸡、蛇", content)
+                        self.assertIn("精选四肖", content)
+                        self.assertIn("兔、狗、马、鸡", content)
+                    self.assertIn("热门预测:", telegram_text)
+                    self.assertEqual("平码 1,2,3,4,5,6" in telegram_text, show_normal)
+                    self.assertNotIn("生肖遗漏回补: 特码", telegram_text)
+                    self.assertEqual(notice.content_format, "html")
+
+    def test_notice_uses_saved_snapshot_and_handles_invalid_group_metadata(self):
+        from models import PredictionRecord
+        module = self.module
+        metadata = build_prediction(self.history, MAPPING)["model_meta"]
+        prediction = PredictionRecord(strategy="zodiac_rebound", period="2026326", region="macau",
+                                      special_number="4", special_zodiac="兔", normal_numbers="1,2,3,5,6,7",
+                                      actual_special_number="4", actual_special_zodiac="兔",
+                                      prediction_metadata=module._serialize_prediction_metadata(metadata))
+        user = SimpleNamespace(username="saved-test", show_normal_numbers=False)
+        with self.app.app_context(), patch.object(module, "notify_user") as notify, \
+             patch.object(module, "get_local_recommendations", side_effect=AssertionError("must not recompute")):
+            snapshot = module._winning_prediction_snapshot(prediction)
+            self.assertEqual(snapshot["prediction_metadata"], prediction.prediction_metadata)
+            module.send_combined_winning_email(user, [SimpleNamespace(**snapshot)], "macau")
+            self.assertIn("综合六肖：兔、狗、牛、马、鸡、蛇", notify.call_args.args[2])
+            self.assertIn("精选四肖：兔、狗、马、鸡", notify.call_args.args[2])
+            for invalid in ("", "broken", '[]', '{"zodiac_rebound":null}',
+                            '{"zodiac_rebound":{"six_zodiacs":"兔狗牛马鸡蛇","four_zodiacs":[]}}'):
+                prediction.prediction_metadata = invalid
+                module.send_combined_prediction_email(user, [prediction], "macau", "2026326")
+                self.assertIn("未保存完整六肖、四肖", notify.call_args.args[2])
+                self.assertNotIn("特码 4", notify.call_args.args[2])
 
     def test_templates_compile_and_strategy_is_selectable(self):
         with self.app.app_context():
