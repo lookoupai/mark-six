@@ -1,0 +1,47 @@
+{% extends "user/base.html" %}
+{% block page_title %}AI 策略助手{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/strategy-assistant.css') }}">
+<section class="assistant-shell" id="strategyAssistantApp" aria-label="策略讨论工作台">
+    <aside class="assistant-history" id="assistantHistory" aria-label="对话记录">
+        <div class="assistant-panel-heading"><h2>对话记录</h2><button type="button" class="assistant-close" data-close="history" aria-label="关闭对话记录">×</button></div>
+        <label for="assistantWorkspace">工作区</label>
+        <select id="assistantWorkspace">{% for item in workspaces %}<option value="{{ item.id }}" {% if item.id == workspace.id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select>
+        <button type="button" id="assistantNew" class="assistant-button primary">新对话</button>
+        <button type="button" id="assistantNewStrategy" class="assistant-button">讨论新策略</button>
+        <form id="assistantSearch" class="assistant-search"><label for="assistantSearchInput">查找对话</label><input id="assistantSearchInput" type="search" maxlength="120" placeholder="对话标题或策略名称"><button class="assistant-button" type="submit">搜索</button></form>
+        <div id="assistantSessionList" class="assistant-session-list"></div>
+        <button type="button" id="assistantMoreSessions" class="assistant-button" hidden>更多对话</button>
+        <a class="assistant-return" id="assistantWorkspaceLink" href="{{ url_for('user.strategy_workspace', workspace_id=workspace.id) }}">返回策略工作区</a>
+    </aside>
+    <main class="assistant-conversation">
+        <header class="assistant-chat-header">
+            <div><h2 id="assistantTarget">新策略讨论</h2><p id="assistantContext">先讨论规则，再决定是否生成和发布草案。</p></div>
+            <div class="assistant-tools"><button type="button" id="assistantHistoryToggle" class="assistant-button" aria-expanded="false">对话记录</button><button type="button" id="assistantInspectorToggle" class="assistant-button" aria-expanded="false">策略与草案</button></div>
+        </header>
+        <div class="assistant-transcript" id="assistantTranscript" tabindex="0" aria-label="聊天消息" role="log" aria-live="polite">
+            <button type="button" id="assistantOlder" class="assistant-button" hidden>加载更早消息</button>
+            <div id="assistantMessages"></div>
+            <div id="assistantWelcome" class="assistant-welcome"><h3>把策略想法说清楚</h3><p>可以讨论统计窗口、筛选依据和需要规避的情况。助手会解释哪些规则能执行、哪些还需要澄清。</p><button type="button" id="assistantExample" class="assistant-example">我想做 10 期短期版，先讨论怎样处理近期重复出现的生肖。</button></div>
+            <div id="assistantThinking" class="assistant-thinking" hidden>AI 正在整理回复…</div>
+        </div>
+        <form id="assistantComposer" class="assistant-composer">
+            <div id="assistantError" class="assistant-error" role="alert" hidden></div>
+            <label for="assistantInput">你的想法</label>
+            <textarea id="assistantInput" name="message" rows="3" maxlength="3000" required placeholder="继续讨论规则，或请助手根据讨论生成草案…"></textarea>
+            <div class="assistant-composer-actions"><span id="assistantStatus" role="status">对话仅自己可见，策略发布需要你确认。</span><button type="button" id="assistantRetry" class="assistant-button" hidden>重试上一条</button><button type="submit" id="assistantSend" class="assistant-button primary">发送</button></div>
+        </form>
+    </main>
+    <aside class="assistant-inspector" id="assistantInspector" aria-label="策略与草案">
+        <div class="assistant-panel-heading"><h2>策略与草案</h2><button type="button" class="assistant-close" data-close="inspector" aria-label="关闭策略与草案">×</button></div>
+        <section class="assistant-context-block"><h3>当前已发布规则</h3><p id="assistantRule">尚未选择已有策略。</p></section>
+        <section id="assistantAttachSection" class="assistant-context-block" hidden>
+            <h3>关联已有策略</h3><p>这段对话尚未关联策略。选择后，继续讨论将基于该策略的当前规则。</p>
+            <form id="assistantAttachForm"><label for="assistantAttachStrategy">要修改的策略</label><select id="assistantAttachStrategy" required><option value="">选择自己的策略</option></select><button type="submit" class="assistant-button">关联所选策略</button></form>
+        </section>
+        <section id="assistantProposal"><h3>待确认草案</h3><p class="assistant-muted">可以先充分讨论；生成草案后，会在这里展示具体规则和改动。</p></section>
+    </aside>
+</section>
+<script id="assistantConfig" type="application/json">{{ assistant_config|tojson }}</script>
+<script src="{{ url_for('static', filename='js/strategy-assistant.js') }}" defer></script>
+{% endblock %}

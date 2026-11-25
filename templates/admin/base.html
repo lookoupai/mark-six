@@ -686,6 +686,7 @@
         <nav class="sidebar-nav">
             <a href="{{ url_for('admin.dashboard') }}"><i>📊</i> 仪表板</a>
             <a href="{{ url_for('admin.users') }}"><i>👥</i> 用户管理</a>
+                <a href="{{ url_for('admin.strategy_workspaces') }}" class="nav-link {% if request.endpoint == 'admin.strategy_workspaces' %}active{% endif %}">策略工作区</a>
             <a href="{{ url_for('admin.activation_codes') }}"><i>🔑</i> 激活码管理</a>
             <a href="{{ url_for('admin.invite_codes') }}"><i>🎫</i> 邀请码管理</a>
             <a href="{{ url_for('admin.zodiac_settings') }}"><i>🐲</i> 生肖管理</a>

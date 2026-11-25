@@ -387,6 +387,287 @@ class PredictionRecord(db.Model):
         return f'<PredictionRecord {self.region}-{self.period}>'
 
 
+class StrategyWorkspace(db.Model):
+    __tablename__ = 'strategy_workspaces'
+    __table_args__ = (
+        db.UniqueConstraint('slug', name='uq_strategy_workspaces_slug'),
+        db.Index('ix_strategy_workspaces_status', 'status'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    slug = db.Column(db.String(80), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    settings_json = db.Column(LargeText)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyWorkspaceMembership(db.Model):
+    __tablename__ = 'strategy_workspace_memberships'
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'user_id', name='uq_strategy_workspace_user'),
+        db.Index('ix_strategy_membership_user_status', 'user_id', 'status'),
+        db.Index('ix_strategy_membership_workspace_role', 'workspace_id', 'role'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    role = db.Column(db.String(30), nullable=False, default='member')
+    status = db.Column(db.String(20), nullable=False, default='active')
+    invited_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyDefinition(db.Model):
+    __tablename__ = 'strategy_definitions'
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'slug', name='uq_strategy_definition_workspace_slug'),
+        db.Index('ix_strategy_definition_workspace_status', 'workspace_id', 'status'),
+        db.Index('ix_strategy_definition_owner_created', 'owner_user_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(36), nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'))
+    owner_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    slug = db.Column(db.String(80), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    kind = db.Column(db.String(30), nullable=False)
+    visibility = db.Column(db.String(20), nullable=False, default='private')
+    status = db.Column(db.String(20), nullable=False, default='draft')
+    active_revision_id = db.Column(db.Integer)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyRevision(db.Model):
+    __tablename__ = 'strategy_revisions'
+    __table_args__ = (
+        db.UniqueConstraint('strategy_id', 'revision_no', name='uq_strategy_revision_number'),
+        db.Index('ix_strategy_revision_created_by', 'created_by_user_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'), nullable=False)
+    revision_no = db.Column(db.Integer, nullable=False)
+    parent_revision_id = db.Column(db.Integer, db.ForeignKey('strategy_revisions.id', ondelete='SET NULL'))
+    schema_version = db.Column(db.Integer, nullable=False, default=1)
+    spec_json = db.Column(LargeText, nullable=False)
+    source = db.Column(db.String(30), nullable=False, default='user')
+    change_summary = db.Column(db.String(500), nullable=False, default='')
+    engine_compatibility = db.Column(db.String(80), nullable=False, default='strategy-platform-v1')
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+
+class StrategySubscription(db.Model):
+    __tablename__ = 'strategy_subscriptions'
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'strategy_id', name='uq_strategy_subscription_user_strategy'),
+        db.Index('ix_strategy_subscription_workspace_enabled', 'workspace_id', 'enabled'),
+        db.Index('ix_strategy_subscription_user_enabled', 'user_id', 'enabled'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'), nullable=False)
+    pinned_revision_id = db.Column(db.Integer, db.ForeignKey('strategy_revisions.id'))
+    revision_policy = db.Column(db.String(20), nullable=False, default='follow_active')
+    regions = db.Column(db.String(40), nullable=False, default='hk,macau')
+    run_mode = db.Column(db.String(20), nullable=False, default='manual')
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyRun(db.Model):
+    __tablename__ = 'strategy_runs'
+    __table_args__ = (
+        db.UniqueConstraint('idempotency_key', name='uq_strategy_run_idempotency_key'),
+        db.Index('ix_strategy_run_workspace_period', 'workspace_id', 'region', 'target_period'),
+        db.Index('ix_strategy_run_strategy_period', 'strategy_id', 'region', 'target_period'),
+        db.Index('ix_strategy_run_subject_created', 'subject_user_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'))
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'), nullable=False)
+    revision_id = db.Column(db.Integer, db.ForeignKey('strategy_revisions.id'), nullable=False)
+    subscription_id = db.Column(db.Integer, db.ForeignKey('strategy_subscriptions.id'))
+    subject_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    strategy_key = db.Column(db.String(120), nullable=False)
+    region = db.Column(db.String(10), nullable=False)
+    target_period = db.Column(db.String(20), nullable=False)
+    input_cutoff = db.Column(db.String(20))
+    engine_version = db.Column(db.String(80), nullable=False)
+    result_schema_id = db.Column(db.String(80), nullable=False)
+    result_schema_version = db.Column(db.Integer, nullable=False, default=1)
+    result_json = db.Column(LargeText, nullable=False)
+    settlement_json = db.Column(LargeText)
+    status = db.Column(db.String(20), nullable=False, default='succeeded')
+    error_code = db.Column(db.String(80))
+    triggered_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    idempotency_key = db.Column(db.String(190), nullable=False)
+    started_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    finished_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+
+class StrategyChatSession(db.Model):
+    __tablename__ = 'strategy_chat_sessions'
+    __table_args__ = (
+        db.Index('ix_strategy_chat_workspace_user_updated', 'workspace_id', 'user_id', 'updated_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'))
+    title = db.Column(db.String(160), nullable=False, default='策略助手')
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyChatMessage(db.Model):
+    __tablename__ = 'strategy_chat_messages'
+    __table_args__ = (
+        db.Index('ix_strategy_chat_message_session_created', 'session_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('strategy_chat_sessions.id'), nullable=False)
+    role = db.Column(db.String(20), nullable=False)
+    content = db.Column(LargeText, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+
+class StrategyProposal(db.Model):
+    __tablename__ = 'strategy_proposals'
+    __table_args__ = (
+        db.Index('ix_strategy_proposal_session_status', 'session_id', 'status'),
+        db.Index('ix_strategy_proposal_owner_created', 'created_by_user_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('strategy_chat_sessions.id'), nullable=False)
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'))
+    base_revision_id = db.Column(db.Integer, db.ForeignKey('strategy_revisions.id'))
+    proposed_spec_json = db.Column(LargeText, nullable=False)
+    diff_json = db.Column(LargeText, nullable=False)
+    validation_report_json = db.Column(LargeText)
+    backtest_run_id = db.Column(db.Integer, db.ForeignKey('backtest_runs.id'))
+    status = db.Column(db.String(30), nullable=False, default='draft')
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='SET NULL'))
+    expires_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyAuditEvent(db.Model):
+    __tablename__ = 'strategy_audit_events'
+    __table_args__ = (
+        db.Index('ix_strategy_audit_workspace_created', 'workspace_id', 'created_at'),
+        db.Index('ix_strategy_audit_actor_created', 'actor_user_id', 'created_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='SET NULL'))
+    action = db.Column(db.String(80), nullable=False)
+    resource_type = db.Column(db.String(40), nullable=False)
+    resource_id = db.Column(db.String(80), nullable=False)
+    reason = db.Column(db.String(500))
+    details_json = db.Column(LargeText)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+
+
+class StrategyBackupDestination(db.Model):
+    __tablename__ = 'strategy_backup_destinations'
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'provider', 'repository_ref', name='uq_strategy_backup_destination'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    provider = db.Column(db.String(30), nullable=False, default='github')
+    repository_ref = db.Column(db.String(200), nullable=False)
+    path_prefix = db.Column(db.String(180), nullable=False, default='strategies')
+    branch = db.Column(db.String(120), nullable=False, default='main')
+    credential_ref = db.Column(db.String(100))
+    enabled = db.Column(db.Boolean, nullable=False, default=False)
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='SET NULL'))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategyBackupOutbox(db.Model):
+    __tablename__ = 'strategy_backup_outbox'
+    __table_args__ = (
+        db.UniqueConstraint('destination_id', 'revision_id', 'event_type', name='uq_strategy_backup_revision_destination'),
+        db.Index('ix_strategy_backup_outbox_status_retry', 'status', 'retry_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    strategy_id = db.Column(db.Integer, db.ForeignKey('strategy_definitions.id'), nullable=False)
+    revision_id = db.Column(db.Integer, db.ForeignKey('strategy_revisions.id'), nullable=False)
+    destination_id = db.Column(db.Integer, db.ForeignKey('strategy_backup_destinations.id'), nullable=False)
+    event_type = db.Column(db.String(20), nullable=False, default='revision', server_default='revision')
+    payload_json = db.Column(LargeText)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    retry_at = db.Column(db.DateTime)
+    last_error_code = db.Column(db.String(80))
+    remote_reference = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategySourceDefinition(db.Model):
+    __tablename__ = 'strategy_source_definitions'
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'source_key', name='uq_strategy_source_workspace_key'),
+        db.Index('ix_strategy_source_workspace_status', 'workspace_id', 'status'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('strategy_workspaces.id'), nullable=False)
+    source_key = db.Column(db.String(80), nullable=False)
+    name = db.Column(db.String(120), nullable=False)
+    provider = db.Column(db.String(80), nullable=False)
+    parser_version = db.Column(db.String(80), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_by_user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='SET NULL'))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class StrategySourceSnapshot(db.Model):
+    __tablename__ = 'strategy_source_snapshots'
+    __table_args__ = (
+        db.Index('ix_strategy_source_snapshot_lookup', 'source_id', 'region', 'period'),
+        db.Index('ix_strategy_source_snapshot_fetched', 'fetched_at'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    source_id = db.Column(db.Integer, db.ForeignKey('strategy_source_definitions.id'), nullable=False)
+    region = db.Column(db.String(10), nullable=False)
+    period = db.Column(db.String(20), nullable=False)
+    published_at = db.Column(db.DateTime)
+    fetched_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    parser_version = db.Column(db.String(80), nullable=False)
+    normalized_payload_json = db.Column(LargeText, nullable=False)
+    quality_status = db.Column(db.String(20), nullable=False, default='pending')
+    quality_report_json = db.Column(LargeText)
+
+
 class BacktestRun(db.Model):
     __tablename__ = 'backtest_runs'
     __table_args__ = (

@@ -435,15 +435,9 @@
             <label>策略:</label>
             <select name="strategy">
                 <option value="" {% if not strategy_filter %}selected{% endif %}>全部</option>
-                <option value="ai" {% if strategy_filter == 'ai' %}selected{% endif %}>AI预测</option>
-                <option value="balanced" {% if strategy_filter == 'balanced' %}selected{% endif %}>均衡预测</option>
-                <option value="hot" {% if strategy_filter == 'hot' %}selected{% endif %}>热门预测</option>
-                <option value="cold" {% if strategy_filter == 'cold' %}selected{% endif %}>冷门预测</option>
-                <option value="trend" {% if strategy_filter == 'trend' %}selected{% endif %}>走势预测</option>
-                <option value="zodiac_rebound" {% if strategy_filter == 'zodiac_rebound' %}selected{% endif %}>生肖遗漏回补</option>
-                <option value="hybrid" {% if strategy_filter == 'hybrid' %}selected{% endif %}>综合预测</option>
-                <option value="markov" {% if strategy_filter == 'markov' %}selected{% endif %}>马尔科夫预测</option>
-                <option value="ml" {% if strategy_filter == 'ml' %}selected{% endif %}>机器学习</option>
+                {% for strategy_key, strategy_label in strategy_catalog.items() %}
+                <option value="{{ strategy_key }}" {% if strategy_filter == strategy_key %}selected{% endif %}>{{ strategy_label }}</option>
+                {% endfor %}
             </select>
         </div>
         <div class="form-group">

@@ -1,0 +1,753 @@
+{% extends "user/base.html" %}
+
+{% block page_title %}策略工作区{% endblock %}
+
+{% block content %}
+<style>
+    .strategy-workspace-shell { display: grid; gap: 1rem; }
+    .strategy-workspace-card { padding: 1.25rem; border-radius: 16px; background: rgba(15, 23, 42, .72); border: 1px solid rgba(148, 163, 184, .2); }
+    .strategy-workspace-card h2 { margin: 0 0 .5rem; color: #f8fafc; font-size: 1.15rem; }
+    .strategy-workspace-muted { color: #94a3b8; line-height: 1.6; }
+    .strategy-member-form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(160px, .7fr) auto; gap: .65rem; margin-top: 1rem; }
+    .strategy-member-form input, .strategy-member-form select, .strategy-member-row select { min-height: 42px; padding: 0 .75rem; border-radius: 9px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
+    .strategy-workspace-button { min-height: 42px; padding: 0 1rem; border: 0; border-radius: 9px; background: #2563eb; color: white; font-weight: 700; cursor: pointer; }
+    .strategy-workspace-message { min-height: 1.4rem; margin-top: .75rem; color: #bae6fd; }
+    .strategy-member-list { display: grid; gap: .6rem; margin-top: 1rem; }
+    .strategy-member-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(130px, .6fr) minmax(140px, .7fr) auto auto; align-items: center; gap: .65rem; padding: .75rem; border-radius: 10px; background: rgba(30, 41, 59, .7); color: #e2e8f0; }
+    .strategy-member-status { color: #94a3b8; font-size: .9rem; }
+    .strategy-grid { display: grid; gap: .7rem; margin-top: 1rem; }
+    .strategy-card-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: .7rem; align-items: center; padding: .8rem; border-radius: 10px; background: rgba(30, 41, 59, .7); color: #e2e8f0; }
+    .strategy-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+    .strategy-output { white-space: pre-wrap; line-height: 1.7; overflow-wrap: anywhere; }
+    .strategy-assistant-link { display: inline-flex; align-items: center; text-decoration: none; margin-top: .8rem; }
+    .strategy-assistant-history { margin-left: 1rem; color: #93c5fd; }
+    .strategy-workspace-button:disabled { opacity: .5; cursor: wait; }
+    .strategy-workspace-button:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 3px; }
+    .strategy-card-detail { color: #94a3b8; font-size: .9rem; margin-top: .2rem; overflow-wrap: anywhere; }
+    .strategy-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; margin-top: 1rem; }
+    .strategy-form input, .strategy-form select { min-height: 42px; padding: .65rem .75rem; border-radius: 9px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
+    .strategy-proposal { margin-top: .8rem; padding: .9rem; border: 1px solid rgba(56, 189, 248, .35); border-radius: 10px; color: #e0f2fe; }
+    .strategy-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #cbd5e1; }
+    .strategy-local-import-form { display: grid; gap: .65rem; margin-top: 1rem; }
+    .strategy-backup-form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(120px, .4fr) auto; gap: .65rem; margin-top: 1rem; }
+    .strategy-backup-form input { min-height: 42px; padding: 0 .75rem; border-radius: 9px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
+    .strategy-workspace-region { display: block; min-width: 160px; margin-top: .35rem; padding: .55rem .7rem; border-radius: 9px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
+    @media (max-width: 680px) {
+        .strategy-member-form, .strategy-member-row, .strategy-card-row, .strategy-form, .strategy-backup-form { grid-template-columns: 1fr; }
+    }
+
+    #strategyBackupSection { scroll-margin-top: 1rem; }
+    .strategy-editor-dialog { margin: auto; width: min(620px, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); padding: 1.5rem; border: 1px solid #475569; border-radius: 14px; background: #172033; color: #f8fafc; color-scheme: dark; }
+    .strategy-editor-dialog::backdrop { background: rgba(2,6,23,.72); }
+    .strategy-editor-dialog h2 { margin-bottom: .6rem; color: #f8fafc; }
+    .strategy-editor-dialog p { color: #cbd5e1; line-height: 1.6; margin-bottom: 1rem; }
+    .strategy-editor-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem; margin-top: 1rem; }
+    .strategy-editor-field { display: grid; gap: .4rem; min-width: 0; }
+    .strategy-editor-field input, .strategy-editor-field select { width: 100%; min-width: 0; min-height: 42px; padding: .6rem; background: #0f172a; color: #f8fafc; border: 1px solid #64748b; border-radius: 7px; }
+    .strategy-editor-regions { grid-column: 1/-1; display: flex; gap: 1rem; border: 0; padding: .5rem 0; }
+    .strategy-editor-regions label { display: flex; align-items: center; gap: .4rem; }
+    .strategy-editor-regions input { accent-color: #60a5fa; }
+    .strategy-editor-actions { display: flex; justify-content: flex-end; gap: .7rem; margin-top: 1rem; }
+    #strategyEditStatus { color: #fda4af; min-height: 1.5rem; padding-top: .7rem; }
+    @media(max-width: 480px) { .strategy-editor-fields { grid-template-columns: 1fr; } .strategy-editor-dialog { padding: 1rem; } }
+</style>
+
+<main class="strategy-workspace-shell" data-workspace-id="{{ workspace.id }}" data-workspace-role="{{ membership.role }}" data-user-id="{{ user.id }}">
+    <section class="strategy-workspace-card">
+        <h2 id="strategyWorkspaceName">{{ workspace.name }}</h2>
+        {% if membership.role == 'owner' %}<button type="button" id="renameStrategyWorkspace" class="strategy-workspace-button">修改工作区名称</button>{% endif %}
+        <label for="strategyWorkspaceSelect" class="strategy-workspace-muted">切换工作区</label>
+        <select id="strategyWorkspaceSelect" class="strategy-workspace-region">
+            {% for item in workspaces %}<option value="{{ item.id }}" {% if item.id == workspace.id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}
+        </select>
+        <div class="strategy-workspace-muted">你的工作区角色：{{ {'owner': '工作区所有者', 'strategy_author': '策略作者', 'member': '成员'}.get(membership.role, membership.role) }}</div>
+        <div class="strategy-workspace-muted">策略作者可以管理自己的策略；工作区权限与站点管理员权限独立。</div>
+        <label class="strategy-workspace-muted" for="strategyRunRegion">运行地区</label>
+        <select id="strategyRunRegion" class="strategy-workspace-region">
+            <option value="hk">香港</option>
+            <option value="macau">澳门</option>
+        </select>
+        <div id="strategyDirectoryMessage" class="strategy-workspace-message" role="status"></div>
+    </section>
+
+    <section class="strategy-workspace-card">
+        <h2>策略目录</h2>
+        <div class="strategy-workspace-muted">内置策略可直接使用；复制后可调整受限参数。自定义策略按版本保存，运行结果保留修订号。</div>
+        <div id="strategyCatalogList" class="strategy-grid"></div>
+        <div id="customStrategyList" class="strategy-grid"></div>
+    </section>
+
+    {% if membership.role in ['owner', 'strategy_author'] %}
+    <section class="strategy-workspace-card">
+        <h2>创建规则策略</h2>
+        <div class="strategy-workspace-muted">通过固定规则配置策略。自定义规则不会执行用户编写的程序代码。</div>
+        <form id="strategyCreateForm" class="strategy-form">
+            <input name="name" maxlength="120" required placeholder="策略名称" aria-label="策略名称">
+            <select name="kind" id="strategySpecKind" aria-label="规则类型">
+                <option value="number_selection">号码筛选</option>
+                <option value="zodiac_groups">生肖组合</option>
+                <option value="external_selection">外部采集结果</option>
+            </select>
+            <input name="window" type="number" min="1" max="240" value="20" placeholder="历史窗口" aria-label="历史窗口">
+            <select name="metric" aria-label="统计指标">
+                <option value="frequency">出现频次</option>
+                <option value="omission">遗漏期数</option>
+                <option value="special_frequency">特码频次</option>
+            </select>
+            <select name="order" aria-label="排序偏好">
+                <option value="highest">优先较高</option>
+                <option value="lowest">优先较低</option>
+            </select>
+            <input name="normal_count" type="number" min="1" max="20" value="6" placeholder="平码候选数" aria-label="候选号码数">
+            <select name="source_key" aria-label="数据来源">
+                <option value="macau_five_zodiac">澳门五码五肖采集</option>
+            </select>
+            <button class="strategy-workspace-button" type="submit">保存策略</button>
+        </form>
+        <div id="strategyCreateMessage" class="strategy-workspace-message" role="status"></div>
+    </section>
+
+    <section class="strategy-workspace-card">
+        <h2>AI 策略助手</h2>
+        <p class="strategy-workspace-muted">在独立聊天页讨论规则，查看回复、历史对话和待确认草案。</p>
+        <a class="strategy-workspace-button strategy-assistant-link" href="{{ url_for('user.strategy_assistant', workspace_id=workspace.id, new=1) }}">新策略对话</a>
+        <a class="strategy-assistant-history" href="{{ url_for('user.strategy_assistant', workspace_id=workspace.id) }}">查看对话记录</a>
+    </section>
+    {% endif %}
+
+    {% if membership.role == 'owner' %}
+    <section class="strategy-workspace-card">
+        <h2>导入本地策略备份</h2>
+        <div class="strategy-workspace-muted">选择导出的策略文件，检查规则后导入为私有草稿。发布前不会自动运行。</div>
+        <form id="strategyLocalImportForm" class="strategy-local-import-form">
+            <label for="strategyBundleFile">策略备份文件</label>
+            <input id="strategyBundleFile" name="bundle" type="file" accept=".json,application/json" required>
+            <button class="strategy-workspace-button" type="submit">预览本地备份</button>
+        </form>
+        <div id="strategyLocalImportMessage" class="strategy-workspace-message" role="status"></div>
+        <div id="strategyLocalImportPreview" class="strategy-proposal" hidden></div>
+    </section>
+    <section class="strategy-workspace-card" id="strategyBackupSection">
+        <h2>GitHub 私有备份</h2>
+        <div class="strategy-workspace-muted">当前工作区的所有已发布策略共用此备份设置，由工作区所有者管理。普通成员无需单独配置；连接凭据由站点部署统一提供。每 60 分钟处理待同步队列；未变更的版本不会重复上传。备份暂不可用时仍可保存和运行策略。</div>
+        <form id="strategyBackupForm" class="strategy-backup-form">
+            <input name="repository" maxlength="200" required placeholder="owner/private-repository">
+            <input name="branch" maxlength="120" value="main" required placeholder="分支">
+            <button class="strategy-workspace-button" type="submit">配置仓库</button>
+        </form>
+        <div id="strategyBackupMessage" class="strategy-workspace-message" role="status"></div>
+        <div id="strategyBackupDestinations" class="strategy-grid"></div>
+        <h2 style="margin-top:1.4rem;">从 GitHub 导入策略</h2>
+        <form id="strategyImportForm" class="strategy-backup-form">
+            <select name="destination_id" id="strategyImportDestination" required class="strategy-workspace-region">
+                <option value="">选择备份仓库</option>
+            </select>
+            <input name="path" maxlength="500" required placeholder="策略 JSON 路径">
+            <button class="strategy-workspace-button" type="submit">读取预览</button>
+        </form>
+        <div id="strategyImportPreview" class="strategy-proposal" hidden></div>
+    </section>
+    {% endif %}
+
+    {% if membership.role == 'owner' %}
+    <section class="strategy-workspace-card">
+        <h2>成员授权</h2>
+        <div class="strategy-workspace-muted">按已注册用户名添加成员。策略作者可以通过策略助手创建和修改自己的策略。</div>
+        <form id="strategyMemberForm" class="strategy-member-form">
+            <input name="username" maxlength="80" required placeholder="成员用户名">
+            <select name="role">
+                <option value="strategy_author">策略作者</option>
+                <option value="member">普通成员</option>
+            </select>
+            <button class="strategy-workspace-button" type="submit">添加成员</button>
+        </form>
+        <div id="strategyWorkspaceMessage" class="strategy-workspace-message" role="status"></div>
+        <div id="strategyMemberList" class="strategy-member-list"></div>
+    </section>
+    {% endif %}
+<dialog id="strategyEditDialog" class="strategy-editor-dialog" aria-labelledby="strategyEditTitle">
+    <form id="strategyEditForm">
+        <h2 id="strategyEditTitle">编辑策略</h2>
+        <p id="strategyEditNote"></p>
+        <label class="strategy-editor-field"><span id="strategyEditNameLabel">策略名称</span><input name="name" maxlength="120" required autocomplete="off"></label>
+        <div id="strategyEditFields" class="strategy-editor-fields"></div>
+        <div id="strategyEditStatus" role="status" aria-live="polite"></div>
+        <div class="strategy-editor-actions">
+            <button type="button" id="strategyEditCancel" class="strategy-workspace-button">取消</button>
+            <button type="submit" id="strategyEditSave" class="strategy-workspace-button">保存</button>
+        </div>
+    </form>
+</dialog>
+</main>
+
+<script>
+(() => {
+    const shell = document.querySelector('.strategy-workspace-shell');
+    const workspaceId = shell.dataset.workspaceId;
+    document.getElementById('strategyWorkspaceSelect')?.addEventListener('change', event => {
+        window.location.assign(`/user/strategy-workspace?workspace_id=${encodeURIComponent(event.target.value)}`);
+    });
+    const list = document.getElementById('strategyMemberList');
+    const message = document.getElementById('strategyWorkspaceMessage');
+    const form = document.getElementById('strategyMemberForm');
+    const directoryMessage = document.getElementById('strategyDirectoryMessage');
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+
+    async function request(path, options = {}) {
+        const response = await fetch(path, {
+            credentials: 'same-origin',
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+                ...(options.headers || {}),
+            },
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.success === false) {
+            throw new Error(payload.message || '请求失败');
+        }
+        return payload;
+    }
+
+    const role = shell.dataset.workspaceRole;
+    const catalogList = document.getElementById('strategyCatalogList');
+    const customList = document.getElementById('customStrategyList');
+    const createForm = document.getElementById('strategyCreateForm');
+    const createMessage = document.getElementById('strategyCreateMessage');
+    const backupForm = document.getElementById('strategyBackupForm');
+    const backupMessage = document.getElementById('strategyBackupMessage');
+    const backupDestinations = document.getElementById('strategyBackupDestinations');
+    const importForm = document.getElementById('strategyImportForm');
+    const importDestination = document.getElementById('strategyImportDestination');
+    const importPreview = document.getElementById('strategyImportPreview');
+    let pendingImport = null;
+
+    function makeButton(label, action) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'strategy-workspace-button';
+        button.textContent = label;
+        button.addEventListener('click', async event => {
+            button.disabled = true;
+            try { await action(event); }
+            finally { if (button.isConnected) button.disabled = false; }
+        });
+        return button;
+    }
+
+    const editDialog = document.getElementById('strategyEditDialog');
+    const editForm = document.getElementById('strategyEditForm');
+    const editFields = document.getElementById('strategyEditFields');
+    const editStatus = document.getElementById('strategyEditStatus');
+    let editor = null;
+
+    function editorField(label, key, value, options = {}) {
+        const wrapper = document.createElement('label');
+        wrapper.className = 'strategy-editor-field';
+        const text = document.createElement('span'); text.textContent = label;
+        const input = options.choices ? document.createElement('select') : document.createElement('input');
+        input.name = key;
+        if (options.choices) {
+            for (const [optionValue, optionLabel] of options.choices) {
+                const option = document.createElement('option'); option.value = optionValue; option.textContent = optionLabel;
+                input.append(option);
+            }
+        } else {
+            input.type = 'number'; input.min = options.min; input.max = options.max; input.step = '1';
+        }
+        input.value = value; input.required = true;
+        wrapper.append(text, input); editFields.append(wrapper);
+        return input;
+    }
+
+    function openStrategyEditor(mode, item) {
+        editor = {mode, item, readers: [], spec: item.revision?.spec ? JSON.parse(JSON.stringify(item.revision.spec)) : null};
+        editFields.replaceChildren(); editStatus.textContent = '';
+        const isEdit = mode === 'edit';
+        document.getElementById('strategyEditTitle').textContent = mode === 'workspace' ? '修改工作区名称' : isEdit ? '编辑策略' : '复制策略';
+        document.getElementById('strategyEditNameLabel').textContent = mode === 'workspace' ? '工作区名称' : '策略名称';
+        editForm.elements.name.value = isEdit || mode === 'workspace' ? item.name : `${item.label || item.name} 副本`;
+        const note = document.getElementById('strategyEditNote');
+        note.textContent = mode === 'workspace' ? '修改名称不会改变成员权限和策略。' : isEdit ? '保存后生成新版本，已有版本和运行记录保持不变。' : '副本仅自己可用；创建后可编辑名称和参数。';
+        if (isEdit) {
+            const spec = editor.spec;
+            const regions = document.createElement('fieldset'); regions.className = 'strategy-editor-regions';
+            const legend = document.createElement('legend'); legend.textContent = '支持地区'; regions.append(legend);
+            for (const [value, label] of [['hk', '香港'], ['macau', '澳门']]) {
+                const row = document.createElement('label'); const input = document.createElement('input');
+                input.type = 'checkbox'; input.value = value; input.name = 'regions';
+                input.checked = (spec.regions || ['hk', 'macau']).includes(value);
+                input.disabled = spec.kind === 'external_selection';
+                row.append(input, document.createTextNode(label)); regions.append(row);
+            }
+            editFields.append(regions);
+            editor.readers.push(() => {
+                const values = [...editForm.querySelectorAll('[name="regions"]:checked')].map(input => input.value);
+                if (!values.length) throw new Error('请至少选择一个地区。');
+                spec.regions = values;
+            });
+            const numeric = (label, key, object, property, fallback, min, max) => {
+                const input = editorField(label, key, object[property] ?? fallback, {min, max});
+                editor.readers.push(() => { object[property] = Number(input.value); });
+            };
+            const choice = (label, key, object, property, fallback, choices) => {
+                const input = editorField(label, key, object[property] ?? fallback, {choices});
+                editor.readers.push(() => { object[property] = input.value; });
+            };
+            const metrics = [['frequency', '出现频次'], ['omission', '遗漏期数'], ['special_frequency', '特码频次']];
+            const orders = [['highest', '优先较高'], ['lowest', '优先较低']];
+            if (spec.kind === 'builtin_config') {
+                spec.parameters ||= {};
+                if (spec.strategy_key === 'zodiac_rebound') {
+                    note.textContent = '保留生肖遗漏回补的六肖、四肖筛选算法。默认统计 20 期，单双连开 5 期后参与同频次排序。';
+                    numeric('统计窗口（期）', 'window', spec.parameters, 'window', 20, 10, 240);
+                    numeric('单双连开阈值（期）', 'parity_streak_threshold', spec.parameters, 'parity_streak_threshold', 5, 2, 20);
+                } else {
+                    numeric('统计窗口（期）', 'window', spec.parameters, 'window', 40, 1, 240);
+                    numeric('号码候选池', 'pool', spec.parameters, 'pool', 16, 8, 24);
+                    numeric('特码候选池', 'special_pool', spec.parameters, 'special_pool', 8, 6, 14);
+                    if (spec.strategy_key === 'trend' || spec.parameters.trend_window !== undefined) numeric('走势窗口（期）', 'trend_window', spec.parameters, 'trend_window', 10, 1, 60);
+                }
+            } else if (spec.kind === 'number_selection') {
+                numeric('统计窗口（期）', 'window', spec, 'window', 20, 1, 240);
+                numeric('候选号码数', 'normal_count', spec, 'normal_count', 6, 1, 20);
+                choice('统计指标', 'rank_metric', spec, 'rank_metric', 'frequency', metrics);
+                choice('排序偏好', 'rank_order', spec, 'rank_order', 'highest', orders);
+            } else if (spec.kind === 'zodiac_groups') {
+                numeric('统计窗口（期）', 'window', spec, 'window', 20, 1, 240);
+                for (const [index, group] of (spec.groups || []).entries()) {
+                    const label = group.label || `组合 ${index + 1}`;
+                    numeric(`${label}：生肖数`, `group_${index}_size`, group, 'size', 6, 1, 12);
+                    choice(`${label}：统计指标`, `group_${index}_metric`, group, 'metric', 'omission', metrics);
+                    choice(`${label}：排序偏好`, `group_${index}_order`, group, 'order', 'highest', orders);
+                }
+            } else if (spec.kind === 'external_selection') {
+                note.textContent = '来源固定为澳门五码五肖采集，可选择引用号码、生肖或两者。';
+                const current = spec.source_fields?.length === 2 ? 'both' : spec.source_fields?.[0] || 'both';
+                const input = editorField('引用内容', 'source_fields', current, {choices: [['both', '号码和生肖'], ['numbers', '仅号码'], ['zodiacs', '仅生肖']]});
+                editor.readers.push(() => { spec.source_fields = input.value === 'both' ? ['numbers', 'zodiacs'] : [input.value]; });
+            }
+        }
+        editDialog.showModal(); editForm.elements.name.focus(); editForm.elements.name.select();
+    }
+    document.getElementById('strategyEditCancel').addEventListener('click', () => editDialog.close());
+    editDialog.addEventListener('click', event => { if (event.target === editDialog) editDialog.close(); });
+    editForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (!editor) return;
+        const current = editor;
+        const save = document.getElementById('strategyEditSave'); save.disabled = true;
+        try {
+            current.readers.forEach(read => read());
+            const name = editForm.elements.name.value.trim();
+            let path, body, method = 'POST';
+            if (current.mode === 'workspace') {
+                path = `/api/v2/workspaces/${workspaceId}`; method = 'PATCH'; body = {name, expected_name: current.item.name};
+            } else if (current.mode === 'edit') {
+                path = `/api/v2/workspaces/${workspaceId}/strategies/${current.item.id}`; method = 'PATCH';
+                body = {name, spec: current.spec, expected_revision_id: current.item.active_revision_id || current.item.revision.id};
+            } else {
+                path = current.mode === 'builtin' ? `/api/v2/workspaces/${workspaceId}/builtin-strategies/${current.item.key}/clone` : `/api/v2/workspaces/${workspaceId}/strategies/${current.item.id}/clone`;
+                body = {name};
+            }
+            const payload = await request(path, {method, body: JSON.stringify(body)});
+            editDialog.close();
+            directoryMessage.textContent = `已保存“${name}”。`;
+            if (current.mode === 'workspace') {
+                document.getElementById('strategyWorkspaceName').textContent = payload.workspace.name;
+                document.getElementById('strategyWorkspaceSelect').selectedOptions[0].textContent = payload.workspace.name;
+            } else await loadStrategies();
+        } catch (error) { editStatus.textContent = error.message; }
+        finally { save.disabled = false; }
+    });
+    document.getElementById('renameStrategyWorkspace')?.addEventListener('click', () => openStrategyEditor('workspace', {name: document.getElementById('strategyWorkspaceName').textContent}));
+
+    function renderCatalog(items) {
+        if (!catalogList) return;
+        catalogList.replaceChildren();
+        for (const item of items || []) {
+            const row = document.createElement('div');
+            row.className = 'strategy-card-row';
+            const info = document.createElement('div');
+            const name = document.createElement('strong');
+            name.textContent = item.label;
+            const detail = document.createElement('div');
+            detail.className = 'strategy-card-detail';
+            detail.textContent = `${(item.regions || []).map(region => region === 'hk' ? '香港' : '澳门').join('、')} · ${item.capabilities?.scheduled_run ? '支持自动运行' : '手动运行'}`;
+            info.append(name, detail);
+            row.append(info);
+            if ((role === 'owner' || role === 'strategy_author') && item.capabilities?.clonable) {
+                row.append(makeButton('复制为自定义策略', () => openStrategyEditor('builtin', item)));
+            }
+            catalogList.append(row);
+        }
+    }
+
+    function resultText(result) {
+        if (result?.kind === 'number_selection') {
+            return `候选号码：${(result.selection?.normal || []).join('、')}\n主选号码：${result.selection?.special?.number || '—'}`;
+        }
+        const lines = (result?.groups || []).map(group => `${group.label || '结果组合'}：${(group.items || []).join('、')}`);
+        if (result?.kind === 'external_selection' && !result.source?.published_at) lines.push('来源发布时间未知，暂不计入公平回测。');
+        return lines.join('\n');
+    }
+
+    function specText(spec) {
+        const names = {number_selection: '号码筛选', zodiac_groups: '生肖组合', external_selection: '澳门外部来源', builtin_config: '内置策略副本'};
+        const metrics = {frequency: '出现频次', omission: '遗漏期数', special_frequency: '特码频次'};
+        const lines = [names[spec?.kind] || '规则策略'];
+        if (spec?.window) lines.push(`参考最近 ${spec.window} 期`);
+        if (spec?.strategy_key === 'zodiac_rebound') {
+            lines.push(`统计 ${spec.parameters?.window ?? 20} 期`, `单双连开阈值 ${spec.parameters?.parity_streak_threshold ?? 5} 期`, '保留综合六肖与精选四肖');
+        } else if (spec?.parameters?.window) lines.push(`参考最近 ${spec.parameters.window} 期`);
+        if (spec?.normal_count) lines.push(`候选号码 ${spec.normal_count} 个`);
+        if (spec?.rank_metric) lines.push(`${metrics[spec.rank_metric] || spec.rank_metric}优先${spec.rank_order === 'lowest' ? '较低' : '较高'}`);
+        for (const group of spec?.groups || []) lines.push(`${group.label || '组合'}：${group.size} 肖，${metrics[group.metric || 'omission']}优先${group.order === 'lowest' ? '较低' : '较高'}`);
+        return lines.join(' · ');
+    }
+
+    function renderCustomStrategies(items) {
+        if (!customList) return;
+        customList.replaceChildren();
+        if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'strategy-workspace-muted';
+            empty.textContent = '此工作区还没有自定义策略。';
+            customList.append(empty);
+            return;
+        }
+        for (const item of items) {
+            const row = document.createElement('div');
+            row.className = 'strategy-card-row';
+            row.dataset.strategyId = item.id;
+            const info = document.createElement('div');
+            const name = document.createElement('strong');
+            name.textContent = item.name;
+            const detail = document.createElement('div');
+            detail.className = 'strategy-card-detail';
+            detail.textContent = `${item.status === 'draft' ? '待发布草稿' : item.visibility === 'workspace' ? '工作区共享' : '仅自己可用'} · 第 ${item.revision?.revision_no || 0} 版 · ${specText(item.revision?.spec)}`;
+            info.append(name, detail);
+            const actions = document.createElement('div'); actions.className = 'strategy-actions';
+            const output = document.createElement('div'); output.className = 'strategy-output'; output.setAttribute('role', 'status');
+            row.append(info, actions, output);
+            const path = `/api/v2/workspaces/${workspaceId}/strategies/${item.id}`;
+            const permission = item.permissions || {};
+            const invoke = action => async () => {
+                try { await action(); }
+                catch (error) { directoryMessage.textContent = error.message; }
+            };
+            const region = () => document.getElementById('strategyRunRegion').value;
+            const supportsRegion = () => (item.revision?.spec?.regions || ['hk', 'macau']).includes(region());
+            if (item.status === 'draft' && permission.edit) actions.append(makeButton('发布草稿', invoke(async () => {
+                if (!window.confirm(`确认发布“${item.name}”？`)) return;
+                await request(`${path}/publish-draft`, {method: 'POST', body: JSON.stringify({confirm: true, expected_revision_id: item.revision.id})});
+                directoryMessage.textContent = '导入草稿已发布。'; await loadStrategies();
+            })));
+            if (permission.run) {
+                actions.append(makeButton('运行', invoke(async () => {
+                    if (!supportsRegion()) throw new Error('此策略不支持当前地区，请切换地区。');
+                    const payload = await request(`${path}/runs`, {method: 'POST', body: JSON.stringify({region: region()})});
+                    output.textContent = `第 ${payload.result.period} 期\n${resultText(payload.result)}`;
+                })));
+                for (const [mode, label] of [['manual', '手动订阅'], ['scheduled', '自动订阅当前地区']]) {
+                    actions.append(makeButton(label, invoke(async () => {
+                        if (!supportsRegion()) throw new Error('此策略不支持当前地区，请切换地区。');
+                        await request(`${path}/subscriptions`, {method: 'POST', body: JSON.stringify({run_mode: mode, regions: [region()]})});
+                        directoryMessage.textContent = mode === 'scheduled' ? '已启用当前地区自动订阅；账号总开关可暂停运行。' : '已添加手动订阅。';
+                        await loadStrategies();
+                    })));
+                }
+                if (item.subscription?.enabled) actions.append(makeButton('取消订阅', invoke(async () => {
+                    await request(`${path}/subscriptions`, {method: 'DELETE'});
+                    directoryMessage.textContent = '已取消订阅。'; await loadStrategies();
+                })));
+            }
+            if (item.status === 'active') actions.append(makeButton('运行记录', invoke(async () => {
+                const payload = await request(`${path}/runs`);
+                output.textContent = (payload.items || []).map(run => `${run.region === 'hk' ? '香港' : '澳门'} · 第 ${run.period} 期\n${run.status === 'failed' ? '运行失败，可重试' : resultText(run.result)}`).join('\n\n') || '还没有运行记录。';
+            })));
+            if (permission.edit && item.status === 'active') {
+                actions.append(makeButton(item.visibility === 'workspace' ? '撤回分享' : '分享到工作区', invoke(async () => {
+                    const visibility = item.visibility === 'workspace' ? 'private' : 'workspace';
+                    if (visibility === 'workspace' && !window.confirm('分享后本工作区成员可运行，策略作者可复制此规则。确认分享？')) return;
+                    await request(`${path}/share`, {method: 'POST', body: JSON.stringify({visibility})});
+                    directoryMessage.textContent = visibility === 'workspace' ? '已分享到工作区。' : '已撤回分享并停止其他成员订阅。'; await loadStrategies();
+                })));
+            }
+            if (permission.edit) {
+                actions.append(makeButton('编辑策略', () => openStrategyEditor('edit', item)));
+                if (item.status === 'active') {
+                    const aiButton = makeButton('AI 修改', () => window.location.assign(`/user/strategy-assistant?workspace_id=${workspaceId}&strategy_id=${encodeURIComponent(item.id)}`));
+                    actions.append(aiButton);
+                }
+            }
+            if (permission.clone) actions.append(makeButton('复制策略', () => openStrategyEditor('clone', item)));
+
+            if (item.status === 'active' && (role === 'owner' || permission.edit)) actions.append(makeButton('导出 JSON', invoke(async () => {
+                const payload = await request(`${path}/export`);
+                const blob = new Blob([JSON.stringify(payload.bundle, null, 2)], {type: 'application/json'});
+                const link = document.createElement('a'); link.href = URL.createObjectURL(blob);
+                link.download = `${item.slug}-strategy.json`; link.click(); URL.revokeObjectURL(link.href);
+            })));
+            if (permission.archive) actions.append(makeButton('归档', invoke(async () => {
+                const reason = window.prompt(`归档“${item.name}”会停止自动运行。请填写原因：`);
+                if (!reason?.trim()) return;
+                await request(`${path}/archive`, {method: 'POST', body: JSON.stringify({reason})});
+                directoryMessage.textContent = '策略已归档，历史结果保留。'; await loadStrategies();
+            })));
+            customList.append(row);
+        }
+    }
+
+    async function loadStrategies() {
+        try {
+            const payload = await request(`/api/v2/workspaces/${workspaceId}/strategies`);
+            renderCatalog(payload.builtins || []);
+            renderCustomStrategies(payload.items || []);
+        } catch (error) {
+            customList?.replaceChildren();
+            directoryMessage.textContent = error.message;
+        }
+    }
+
+    if (createForm) {
+        function updateRuleFields() {
+            const kind = createForm.elements.kind.value;
+            for (const key of ['window', 'metric', 'order']) createForm.elements[key].hidden = kind === 'external_selection';
+            createForm.elements.normal_count.hidden = kind !== 'number_selection';
+            createForm.elements.source_key.hidden = kind !== 'external_selection';
+        }
+        createForm.elements.kind.addEventListener('change', updateRuleFields);
+        updateRuleFields();
+        createForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            const values = new FormData(createForm);
+            const kind = values.get('kind');
+            const windowSize = Number(values.get('window'));
+            let spec;
+            if (kind === 'number_selection') {
+                spec = { schema_version: 1, kind, regions: ['hk', 'macau'], window: windowSize,
+                    normal_count: Number(values.get('normal_count')),
+                    rank_metric: values.get('metric'), rank_order: values.get('order') };
+            } else if (kind === 'zodiac_groups') {
+                spec = { schema_version: 1, kind, regions: ['hk', 'macau'], window: windowSize,
+                    groups: [
+                        { id: 'six', label: '综合六肖', size: 6, metric: values.get('metric'), order: values.get('order') },
+                        { id: 'four', label: '精选四肖', size: 4, metric: values.get('metric'), order: values.get('order') },
+                    ] };
+            } else {
+                spec = { schema_version: 1, kind, regions: ['macau'], source_key: values.get('source_key'), source_fields: ['numbers', 'zodiacs'] };
+            }
+            try {
+                const payload = await request(`/api/v2/workspaces/${workspaceId}/strategies`, {
+                    method: 'POST', body: JSON.stringify({ name: values.get('name'), spec }),
+                });
+                createForm.reset();
+                updateRuleFields();
+                createMessage.textContent = `策略“${payload.item.name}”已保存。`;
+                loadStrategies();
+            } catch (error) { createMessage.textContent = error.message; }
+        });
+    }
+
+    if (backupForm) {
+        backupForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            const values = new FormData(backupForm);
+            try {
+                await request(`/api/v2/workspaces/${workspaceId}/management/backup/github`, {
+                    method: 'POST', body: JSON.stringify({ repository: values.get('repository'), branch: values.get('branch') }),
+                });
+                backupMessage.textContent = '私有仓库已配置。';
+                loadBackupSettings();
+            } catch (error) { backupMessage.textContent = error.message; }
+        });
+    }
+
+    async function loadBackupSettings() {
+        if (!backupDestinations) return;
+        try {
+            const payload = await request(`/api/v2/workspaces/${workspaceId}/management/backup/github`);
+            backupDestinations.replaceChildren();
+            importDestination.replaceChildren();
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = '选择备份仓库';
+            importDestination.append(placeholder);
+            for (const destination of payload.destinations || []) {
+                const option = document.createElement('option');
+                option.value = destination.id;
+                option.textContent = `${destination.repository} (${destination.branch})`;
+                importDestination.append(option);
+                const row = document.createElement('div');
+                row.className = 'strategy-card-row';
+                const label = document.createElement('span');
+                label.textContent = `${destination.repository} · ${destination.branch} · ${destination.enabled ? '启用' : '停用'}`;
+                const sync = makeButton('同步已发布版本', async () => {
+                    try {
+                        const result = await request(`/api/v2/workspaces/${workspaceId}/management/backup/github/sync`, { method: 'POST', body: '{}' });
+                        backupMessage.textContent = `已加入 ${result.queued} 个待同步版本。`;
+                    } catch (error) { backupMessage.textContent = error.message; }
+                });
+                row.append(label, sync);
+                backupDestinations.append(row);
+            }
+            backupMessage.textContent = `${payload.token_configured ? '备份连接已配置' : '请联系服务器管理员配置备份连接'}；待同步 ${payload.outbox_counts?.pending || 0}，已同步 ${payload.outbox_counts?.synced || 0}，需处理 ${payload.outbox_counts?.failed || 0}。`;
+        } catch (error) { backupMessage.textContent = error.message; }
+    }
+
+    if (importForm) {
+        importForm.addEventListener('submit', async event => {
+            event.preventDefault();
+            const values = new FormData(importForm);
+            const requestData = {
+                destination_id: Number(values.get('destination_id')),
+                path: values.get('path'),
+            };
+            try {
+                const payload = await request(`/api/v2/workspaces/${workspaceId}/management/backup/github/import-preview`, {
+                    method: 'POST', body: JSON.stringify(requestData),
+                });
+                pendingImport = {...requestData, expected_digest: payload.digest, confirm: true};
+                importPreview.replaceChildren();
+                importPreview.hidden = false;
+                const preview = document.createElement('pre');
+                preview.textContent = `${payload.preview.name}\n${specText(payload.preview.spec)}\n导入后为私有草稿，需要另行确认发布。`;
+                importPreview.append(preview, makeButton('确认导入为草稿', async () => {
+                    try {
+                        const imported = await request(`/api/v2/workspaces/${workspaceId}/management/backup/github/import`, {
+                            method: 'POST', body: JSON.stringify(pendingImport),
+                        });
+                        backupMessage.textContent = `策略“${imported.item.name}”已导入为草稿。`;
+                        importPreview.hidden = true;
+                        loadStrategies();
+                    } catch (error) { backupMessage.textContent = error.message; }
+                }));
+            } catch (error) { backupMessage.textContent = error.message; }
+        });
+    }
+
+    const localForm = document.getElementById('strategyLocalImportForm');
+    if (localForm) localForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        const status = document.getElementById('strategyLocalImportMessage');
+        const previewBox = document.getElementById('strategyLocalImportPreview');
+        previewBox.hidden = true;
+        try {
+            const file = document.getElementById('strategyBundleFile').files[0];
+            if (!file || file.size > 100000) throw new Error('请选择小于 100 KB 的策略备份文件。');
+            const bundle = JSON.parse(await file.text());
+            const preview = await request(`/api/v2/workspaces/${workspaceId}/management/backup/import-preview`, {
+                method: 'POST', body: JSON.stringify({bundle}),
+            });
+            previewBox.replaceChildren(); previewBox.hidden = false;
+            const text = document.createElement('p'); text.textContent = `${preview.preview.name} · ${specText(preview.preview.spec)}。将导入为私有草稿。`;
+            previewBox.append(text, makeButton('确认导入本地草稿', async () => {
+                try {
+                    const imported = await request(`/api/v2/workspaces/${workspaceId}/management/backup/import`, {
+                        method: 'POST', body: JSON.stringify({bundle, expected_digest: preview.digest, confirm: true}),
+                    });
+                    status.textContent = `“${imported.item.name}”已导入，确认规则后可发布。`;
+                    previewBox.hidden = true; localForm.reset(); await loadStrategies();
+                } catch (error) { status.textContent = error.message; }
+            }));
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    function renderMembers(items) {
+        list.replaceChildren();
+        for (const item of items) {
+            const row = document.createElement('div');
+            row.className = 'strategy-member-row';
+            const name = document.createElement('strong');
+            name.textContent = item.username || `用户 ${item.user_id}`;
+            const userId = document.createElement('span');
+            userId.className = 'strategy-member-status';
+            userId.textContent = `账号 ID ${item.user_id}`;
+            const role = document.createElement('select');
+            role.disabled = item.role === 'owner' || item.status !== 'active';
+            for (const [value, label] of [['strategy_author', '策略作者'], ['member', '普通成员']]) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                option.selected = item.role === value;
+                role.append(option);
+            }
+            role.addEventListener('change', async () => {
+                try {
+                    await request(`/api/v2/workspaces/${workspaceId}/members/${item.user_id}`, {
+                        method: 'PATCH', body: JSON.stringify({ role: role.value }),
+                    });
+                    message.textContent = '成员角色已更新。';
+                } catch (error) {
+                    message.textContent = error.message;
+                    loadMembers();
+                }
+            });
+            const remove = document.createElement('button');
+            remove.className = 'strategy-workspace-button';
+            remove.type = 'button';
+            remove.textContent = item.status === 'active' ? '移出工作区' : '已移出';
+            remove.disabled = item.role === 'owner' || item.status !== 'active';
+            remove.addEventListener('click', async () => {
+                try {
+                    await request(`/api/v2/workspaces/${workspaceId}/members/${item.user_id}`, { method: 'DELETE' });
+                    message.textContent = '成员已移出工作区。';
+                    loadMembers();
+                } catch (error) {
+                    message.textContent = error.message;
+                }
+            });
+            const transfer = document.createElement('button');
+            transfer.className = 'strategy-workspace-button';
+            transfer.type = 'button';
+            transfer.textContent = '转移所有权';
+            transfer.disabled = item.role === 'owner' || item.status !== 'active';
+            transfer.addEventListener('click', async () => {
+                if (!window.confirm(`将工作区所有权转移给 ${item.username}？`)) return;
+                try {
+                    await request(`/api/v2/workspaces/${workspaceId}/owner-transfer`, {
+                        method: 'POST', body: JSON.stringify({ user_id: item.user_id }),
+                    });
+                    window.location.reload();
+                } catch (error) {
+                    message.textContent = error.message;
+                }
+            });
+            row.append(name, userId, role, remove, transfer);
+            list.append(row);
+        }
+    }
+
+    async function loadMembers() {
+        try {
+            const payload = await request(`/api/v2/workspaces/${workspaceId}/members`);
+            renderMembers(payload.items || []);
+        } catch (error) {
+            message.textContent = error.message;
+        }
+    }
+
+    if (form) form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const values = new FormData(form);
+        try {
+            await request(`/api/v2/workspaces/${workspaceId}/members`, {
+                method: 'POST',
+                body: JSON.stringify({ username: values.get('username'), role: values.get('role') }),
+            });
+            form.reset();
+            message.textContent = '成员已添加到工作区。';
+            loadMembers();
+        } catch (error) {
+            message.textContent = error.message;
+        }
+    });
+
+    loadStrategies();
+    if (list) loadMembers();
+    loadBackupSettings();
+})();
+</script>
+{% endblock %}

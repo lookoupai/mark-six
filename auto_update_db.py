@@ -18,6 +18,9 @@ from sqlalchemy.engine import make_url
 DB_PATH = os.path.join(os.getcwd(), 'data', 'lottery_system.db')
 DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if DATABASE_URL.startswith("sqlite:"):
+    # Respect isolated fixtures and explicit SQLite deployments alike.
+    DB_PATH = make_url(DATABASE_URL).database
 
 
 MYSQL_CHARSET = "utf8mb4"
@@ -173,6 +176,38 @@ def _update_mysql_database():
                     if not _mysql_column_exists(connection, "user", column_name):
                         connection.execute(text(f"ALTER TABLE `user` ADD COLUMN `{column_name}` {ddl}"))
                         changes.append(f"Added user.{column_name}")
+
+                # Keep the legacy prediction preferences intact. Only backfill missing
+                # values; an explicit auto_prediction_enabled=0 or a selected strategy
+                # such as "balanced" is a user choice, not an unset default.
+                if _mysql_column_exists(connection, "user", "auto_prediction_regions"):
+                    result = connection.execute(text(
+                        "UPDATE `user` SET auto_prediction_regions = 'hk,macau' "
+                        "WHERE auto_prediction_regions IS NULL "
+                        "OR TRIM(auto_prediction_regions) = '' "
+                        "OR TRIM(auto_prediction_regions) = 'NULL'"
+                    ))
+                    if result.rowcount:
+                        changes.append(f"Backfilled auto_prediction_regions for {result.rowcount} users")
+
+                if _mysql_column_exists(connection, "user", "auto_prediction_enabled"):
+                    result = connection.execute(text(
+                        "UPDATE `user` SET auto_prediction_enabled = 1 "
+                        "WHERE auto_prediction_enabled IS NULL AND is_active = 1"
+                    ))
+                    if result.rowcount:
+                        changes.append(f"Enabled auto_prediction_enabled default for {result.rowcount} active users")
+
+                if _mysql_column_exists(connection, "user", "auto_prediction_strategies"):
+                    result = connection.execute(text(
+                        "UPDATE `user` SET auto_prediction_strategies = "
+                        "'hot,cold,trend,hybrid,balanced,markov,ml' "
+                        "WHERE auto_prediction_strategies IS NULL "
+                        "OR TRIM(auto_prediction_strategies) = '' "
+                        "OR TRIM(auto_prediction_strategies) = 'NULL'"
+                    ))
+                    if result.rowcount:
+                        changes.append(f"Backfilled auto_prediction_strategies for {result.rowcount} users")
 
                 if not _mysql_index_exists(connection, "user", "ix_user_github_id"):
                     connection.execute(text("CREATE UNIQUE INDEX ix_user_github_id ON `user` (`github_id`)"))
@@ -589,8 +624,8 @@ def update_database():
             UPDATE user 
             SET auto_prediction_regions = 'hk,macau' 
             WHERE auto_prediction_regions IS NULL 
-               OR auto_prediction_regions = '' 
-               OR auto_prediction_regions = 'NULL'
+               OR TRIM(auto_prediction_regions) = ''
+               OR TRIM(auto_prediction_regions) = 'NULL'
         ''')
         updated_users = cursor.rowcount
         print(f"✓ 更新了 {updated_users} 个用户的自动预测地区设置")
@@ -599,7 +634,7 @@ def update_database():
         cursor.execute('''
             UPDATE user 
             SET auto_prediction_enabled = 1 
-            WHERE (auto_prediction_enabled IS NULL OR auto_prediction_enabled = 0) AND is_active = 1
+            WHERE auto_prediction_enabled IS NULL AND is_active = 1
         ''')
         updated_enabled = cursor.rowcount
         print(f"✓ 更新了 {updated_enabled} 个用户的自动预测状态为开启")
@@ -619,9 +654,8 @@ def update_database():
             UPDATE user 
             SET auto_prediction_strategies = 'hot,cold,trend,hybrid,balanced,markov,ml' 
             WHERE auto_prediction_strategies IS NULL 
-               OR auto_prediction_strategies = '' 
-               OR auto_prediction_strategies = 'NULL'
-               OR auto_prediction_strategies = 'balanced'
+               OR TRIM(auto_prediction_strategies) = ''
+               OR TRIM(auto_prediction_strategies) = 'NULL'
         ''')
         updated_strategies = cursor.rowcount
         print(f"✓ 更新了 {updated_strategies} 个用户的自动预测策略设置")

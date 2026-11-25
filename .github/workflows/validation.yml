@@ -1,0 +1,62 @@
+name: Validation
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      ENABLE_SCHEDULER: '0'
+      ENABLE_STARTUP_BACKTEST_WARMUP: '0'
+      ENABLE_STARTUP_ML_WARMUP: '0'
+      ENABLE_STARTUP_ZODIAC_BACKFILL: '0'
+      NOTIFY_ASYNC: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m venv .venv
+      - run: .venv/bin/pip install -r requirements-dev.txt
+      - run: .venv/bin/python -m coverage run --source=strategy_platform -m unittest discover -s tests -v
+      - run: .venv/bin/python -m coverage report --fail-under=70
+      - run: .venv/bin/python scripts/test_activation_issue.py
+      - run: .venv/bin/python scripts/security_regression.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run browser:install
+      - run: npm run test:e2e
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.10'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: mobile/mark_six
+      # Existing warnings and info lints remain visible; compilation errors fail CI.
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        working-directory: mobile/mark_six
+      - run: flutter test
+        working-directory: mobile/mark_six
+      - run: flutter build apk --debug
+        working-directory: mobile/mark_six
+      # Ordinary branch/PR builds do not upload or release an APK.

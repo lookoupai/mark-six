@@ -22,13 +22,14 @@ from markupsafe import escape
 from sqlalchemy import create_engine, event, inspect, and_, or_
 from sqlalchemy.engine import make_url
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED, EVENT_JOB_ERROR
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # 导入用户系统模块
 from models import (
     db, User, PredictionRecord, SystemConfig, InviteCode, LotteryDraw, ManualBetRecord, BacktestRun,
-    MacauCollectedData, SHARED_PREDICTION_USER_ID, personalized_predictions_enabled, prediction_scope_user_ids,
+    MacauCollectedData, StrategyRun, StrategySubscription, StrategyDefinition, StrategyRevision,
+    StrategyWorkspaceMembership, ZodiacSetting, SHARED_PREDICTION_USER_ID, personalized_predictions_enabled, prediction_scope_user_ids,
 )
 from retention_service import cleanup_expired_data
 from jinja2.ext import Extension
@@ -49,6 +50,23 @@ from invite_routes import invite_bp
 from api_mobile import mobile_api_bp
 from notification_service import notify_user, dispatch_notification
 from zodiac_rebound import build_prediction as build_zodiac_prediction, evaluate_groups, summarize_groups
+from strategy_platform.catalog import (
+    get_strategy,
+    get_strategy_catalog,
+    get_strategy_icons,
+    get_strategy_keys,
+    get_strategy_labels,
+)
+from strategy_platform.results import attach_strategy_result, build_strategy_result
+from strategy_platform.runners import ExecutionContext, strategy_runner_registry
+from strategy_platform.service import (
+    add_strategy_run,
+    add_custom_strategy_run,
+    execute_workspace_spec,
+    get_strategy_run_result,
+    seed_builtin_strategies,
+)
+from strategy_platform.api import strategy_api_bp
 
 # --- 配置信息 ---
 data_dir = os.path.join(os.getcwd(), 'data')
@@ -868,7 +886,7 @@ def inject_csrf_helpers(response):
         if not response.mimetype or "text/html" not in response.mimetype:
             return response
         body = response.get_data(as_text=True)
-        if "</head>" not in body or 'name="csrf-token"' in body:
+        if "</head>" not in body or re.search(r"<meta\b[^>]*\bname\s*=\s*['\"]csrf-token['\"]", body, re.I):
             return response
         token = _get_csrf_token()
         nonce = getattr(g, "csp_nonce", "")
@@ -1228,29 +1246,8 @@ def _describe_database_target(database_uri):
         return "SQLite", database_name
     return backend or "unknown", database_name
 
-STRATEGY_LABELS = {
-    'zodiac_rebound': '生肖遗漏回补',
-    'ml': '机器学习预测',
-    'markov': '马尔科夫预测',
-    'balanced': '均衡预测',
-    'ai': 'AI智能预测',
-    'hot': '热门预测',
-    'cold': '冷门预测',
-    'trend': '走势预测',
-    'hybrid': '综合预测'
-}
-
-STRATEGY_ICON_MAP = {
-    'zodiac_rebound': 'paw',
-    'hot': 'fire',
-    'cold': 'snowflake',
-    'trend': 'chart-line',
-    'hybrid': 'sliders-h',
-    'balanced': 'balance-scale',
-    'markov': 'project-diagram',
-    'ml': 'flask',
-    'ai': 'robot',
-}
+STRATEGY_LABELS = get_strategy_labels()
+STRATEGY_ICON_MAP = get_strategy_icons()
 
 def _get_strategy_label(strategy):
     return STRATEGY_LABELS.get(strategy, strategy or '未知策略')
@@ -1874,6 +1871,8 @@ def _prediction_notice_zodiac_groups(prediction):
     """Use the selections saved with this prediction, never recompute history."""
     if getattr(prediction, 'strategy', '') != 'zodiac_rebound':
         return {}
+    # A legacy row has its own immutable snapshot. A period/strategy lookup is
+    # not a record association and may return a different run after a revision.
     metadata = _deserialize_prediction_metadata(getattr(prediction, 'prediction_metadata', ''))
     analysis = metadata.get('zodiac_rebound') if isinstance(metadata, dict) else None
     if not isinstance(analysis, dict):
@@ -2046,10 +2045,10 @@ def _prediction_notice_wrapper_html(title, intro, body_html, footer_note='', ton
     </div>
     '''
 
-LOCAL_STRATEGY_KEYS = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml"]
+LOCAL_STRATEGY_KEYS = get_strategy_keys(capability="number_tuning")
 # Fixed zodiac rules can be selected for automatic predictions, but do not
 # participate in number-strategy tuning or change the ML ensemble.
-AUTO_PREDICTION_STRATEGY_KEYS = LOCAL_STRATEGY_KEYS + ["zodiac_rebound"]
+AUTO_PREDICTION_STRATEGY_KEYS = get_strategy_keys(capability="scheduled_run")
 _draws_api_cache_lock = threading.Lock()
 _draws_api_cache = {}
 _DRAWS_API_CACHE_TTL = 60
@@ -2409,11 +2408,31 @@ def ensure_runtime_database_schema():
         except Exception as e:
             print(f"Runtime schema sync failed: {e}")
 
+        # Do not serve partially migrated strategy data. The existing startup
+        # schema lock serializes this repeatable, numbered upgrade.
+        from strategy_platform.migrations import upgrade_strategy_schema
+        upgrade_strategy_schema(db.engine)
+
+        try:
+            seed_builtin_strategies()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Built-in strategy catalog initialization failed: {e}")
+
         try:
             from auto_update_db import check_and_update_database
             check_and_update_database()
         except Exception as e:
             print(f"运行时自动更新数据库结构时出错: {e}")
+
+        try:
+            from strategy_platform.legacy import migrate_legacy_auto_prediction_subscriptions
+            migrated_users = migrate_legacy_auto_prediction_subscriptions()
+            if migrated_users:
+                print(f"Mirrored legacy automatic-prediction subscriptions for {migrated_users} users")
+        except Exception as e:
+            db.session.rollback()
+            print(f"Legacy automatic-prediction subscription migration failed: {e}")
 
 with _startup_schema_lock():
     ensure_runtime_database_schema()
@@ -2460,6 +2479,7 @@ app.register_blueprint(user_bp)
 app.register_blueprint(activation_code_bp)
 app.register_blueprint(invite_bp, url_prefix='/invite')
 app.register_blueprint(mobile_api_bp)
+app.register_blueprint(strategy_api_bp)
 
 # 获取AI配置的函数
 def get_ai_config():
@@ -10264,7 +10284,7 @@ def _predict_zodiac_rebound(data, region):
         return {"error": message, "error_type": "invalid_zodiac_history"}
 
 
-def get_local_recommendations(strategy, data, region, variation_key=None):
+def _get_local_recommendations_legacy(strategy, data, region, variation_key=None):
     all_numbers = list(range(1, 50))
     if strategy == 'zodiac_rebound':
         return _predict_zodiac_rebound(data, region)
@@ -10603,6 +10623,30 @@ def get_local_recommendations(strategy, data, region, variation_key=None):
             if strategy == 'balanced':
                 return _build_default_baseline_prediction()
             return get_local_recommendations('balanced', data, region, variation_key=variation_key)
+
+
+def _execute_legacy_strategy(context):
+    return _get_local_recommendations_legacy(
+        context.strategy_key,
+        context.data,
+        context.region,
+        variation_key=context.variation_key,
+    )
+
+
+for _strategy_key in get_strategy_keys(kind="builtin"):
+    strategy_runner_registry.register(_strategy_key, _execute_legacy_strategy)
+
+
+def get_local_recommendations(strategy, data, region, variation_key=None):
+    """Compatibility facade dispatching built-in work through the runner registry."""
+    context = ExecutionContext(
+        strategy_key=str(strategy or "").strip(),
+        data=data,
+        region=str(region or "").strip(),
+        variation_key=variation_key,
+    )
+    return strategy_runner_registry.execute(context)
 
 def _build_ai_prompt(data, region, history_window=10):
     history_lines = []
@@ -12557,7 +12601,23 @@ def index():
     if not user.is_active:
         flash('您的账号尚未激活，部分功能受限。请先激活账号。', 'warning')
     
-    return render_template('index.html', user=user, show_normal_numbers=bool(user.show_normal_numbers))
+    return render_template(
+        'index.html',
+        user=user,
+        show_normal_numbers=bool(user.show_normal_numbers),
+        prediction_strategy_catalog=get_strategy_catalog(capability="manual_run"),
+    )
+
+
+@app.route('/api/strategy-catalog')
+def strategy_catalog_api():
+    user, auth_error = _require_active_session_json()
+    if auth_error:
+        return auth_error
+    return jsonify({
+        "success": True,
+        "items": get_strategy_catalog(capability="manual_run"),
+    })
 
 
 _LUNAR_HEAVENLY_STEMS = ('甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸')
@@ -12921,12 +12981,12 @@ def save_draws_to_database(draws, region):
         print(f"保存开奖记录到数据库失败: {e}")
         db.session.rollback()
 
-AUTO_BACKTEST_STRATEGIES = ("ml", "markov", "hybrid", "balanced", "trend", "hot", "cold")
+AUTO_BACKTEST_STRATEGIES = tuple(get_strategy_keys(capability="automatic_backtest"))
 AUTO_BACKTEST_MIN_HISTORY = 10
 AUTO_BACKTEST_LIMIT = 240
 AUTO_OPTIMIZE_HOLDOUT_PERIODS = 24
 AI_BACKTEST_MAX_PERIODS = 24
-POSTPROCESS_BACKTEST_STRATEGIES = ("ml", "markov", "hybrid", "balanced", "trend", "hot", "cold")
+POSTPROCESS_BACKTEST_STRATEGIES = AUTO_BACKTEST_STRATEGIES
 POSTPROCESS_TUNING_STRATEGIES = POSTPROCESS_BACKTEST_STRATEGIES
 POSTPROCESS_BACKTEST_LIMIT = 120
 
@@ -14270,6 +14330,7 @@ def _winning_notification_recipient_ids(pred):
 
 
 WINNING_SNAPSHOT_FIELDS = (
+    'user_id',
     'strategy',
     'period',
     'region',
@@ -14354,6 +14415,7 @@ def update_prediction_accuracy(data, region, trigger_auto_predictions=True, tune
                     'special': special_number,
                     'special_zodiac': special_zodiac,
                     'normal': normal_numbers[:6],
+                    'date': str(draw.get('date') or ''),
                 }
         
         user_hits = {}
@@ -14394,6 +14456,24 @@ def update_prediction_accuracy(data, region, trigger_auto_predictions=True, tune
         
         # 提交更改
         db.session.commit()
+
+        strategy_runs = StrategyRun.query.filter_by(region=region).filter(
+            StrategyRun.target_period.in_(draw_results.keys()),
+            StrategyRun.settlement_json.is_(None),
+        ).all() if draw_results else []
+        for run in strategy_runs:
+            result = draw_results.get(run.target_period)
+            prediction = json.loads(run.result_json)
+            from strategy_platform.results import evaluate_result
+            target_map = _get_number_to_zodiac_map(ZodiacSetting.get_zodiac_year_for_date(result.get("date")))
+            try:
+                settlement = evaluate_result(prediction, {**result, "id": run.target_period}, target_map)
+            except ValueError:
+                # Incomplete legacy output stays explicitly unevaluated.
+                settlement = {"period": run.target_period, "evaluated": False, "error": "invalid_result"}
+            run.settlement_json = json.dumps(settlement, ensure_ascii=False, separators=(",", ":"))
+        if strategy_runs:
+            db.session.commit()
 
         # 统一发送合并后的中奖邮件。SMTP 是阻塞 IO，共享预测模式下又要发给所有订阅用户，
         # 因此只在这里做数据快照，真正的发送丢到后台单线程串行执行。
@@ -14450,14 +14530,42 @@ def generate_auto_predictions(data, region):
         shared_fresh_strategies = set()
 
         for user in auto_predict_users:
-            strategies = user.auto_prediction_strategies.split(',') if user.auto_prediction_strategies else list(LOCAL_STRATEGY_KEYS)
-            strategies = [strategy for strategy in strategies if strategy in AUTO_PREDICTION_STRATEGY_KEYS]
-            if not strategies:
-                strategies = list(LOCAL_STRATEGY_KEYS)
-            regions = user.auto_prediction_regions.split(',') if hasattr(user, 'auto_prediction_regions') and user.auto_prediction_regions else ['hk', 'macau']
+            from strategy_platform.legacy import (
+                get_legacy_builtin_subscriptions,
+                legacy_subscription_settings_match,
+            )
+            builtin_subscriptions = get_legacy_builtin_subscriptions(user.id)
+            use_v2_subscriptions = bool(builtin_subscriptions)
 
-            if region not in regions:
-                continue
+            if use_v2_subscriptions:
+                subscription_workspace_id = next(iter(builtin_subscriptions.values())).workspace_id
+                active_membership = StrategyWorkspaceMembership.query.filter_by(
+                    workspace_id=subscription_workspace_id,
+                    user_id=user.id,
+                    status="active",
+                ).first()
+                if not active_membership:
+                    continue
+                if not legacy_subscription_settings_match(user, builtin_subscriptions):
+                    print(f"Legacy/V2 auto-prediction settings differ for user_id={user.id}; using legacy preferences")
+                    use_v2_subscriptions = False
+
+            if use_v2_subscriptions:
+                strategies = [
+                    strategy for strategy, subscription in builtin_subscriptions.items()
+                    if subscription.enabled
+                ]
+                if not strategies:
+                    continue
+            else:
+                builtin_subscriptions = {}
+                strategies = user.auto_prediction_strategies.split(',') if user.auto_prediction_strategies else list(LOCAL_STRATEGY_KEYS)
+                strategies = [strategy for strategy in strategies if strategy in AUTO_PREDICTION_STRATEGY_KEYS]
+                if not strategies:
+                    strategies = list(LOCAL_STRATEGY_KEYS)
+                regions = user.auto_prediction_regions.split(',') if hasattr(user, 'auto_prediction_regions') and user.auto_prediction_regions else ['hk', 'macau']
+                if region not in regions:
+                    continue
 
             user_predictions = []
             has_new_predictions = False
@@ -14470,6 +14578,13 @@ def generate_auto_predictions(data, region):
                     if strategy == 'ai':
                         continue
                     resolved_strategy = strategy
+
+                    subscription = builtin_subscriptions.get(resolved_strategy)
+                    if builtin_subscriptions and (
+                        subscription is None
+                        or region not in str(subscription.regions or "").split(",")
+                    ):
+                        continue
 
                     if resolved_strategy in seen_strategies:
                         continue
@@ -14495,7 +14610,14 @@ def generate_auto_predictions(data, region):
                             ).first()
 
                     if not existing:
-                        pred = generate_prediction_for_user(user, region, next_period, resolved_strategy, data)
+                        pred = generate_prediction_for_user(
+                            user,
+                            region,
+                            next_period,
+                            resolved_strategy,
+                            data,
+                            subscription=builtin_subscriptions.get(resolved_strategy) if personalized_mode else None,
+                        )
                         if pred:
                             user_predictions.append(pred)
                             has_new_predictions = True
@@ -14520,11 +14642,128 @@ def generate_auto_predictions(data, region):
                     send_combined_prediction_email(user, user_predictions, region, next_period, latest_draw)
                 except Exception as e:
                     print(f"自动发送合并预测邮件给 {user.username} 失败：{e}")
+
+        _generate_subscribed_custom_predictions(data, region, next_period)
     except Exception as e:
         print(f"自动预测出错：{e}")
         db.session.rollback()
 
-def generate_prediction_for_user(user, region, period, strategy, data):
+
+def _generate_subscribed_custom_predictions(data, region, target_period):
+    from models import StrategyAuditEvent
+    subscriptions = StrategySubscription.query.filter_by(
+        enabled=True,
+        run_mode="scheduled",
+    ).all()
+    if not subscriptions or not data:
+        return
+    latest_period = str(data[0].get("id") or "")
+    for subscription in subscriptions:
+        if region not in [value.strip() for value in str(subscription.regions or "").split(",") if value.strip()]:
+            continue
+        from strategy_platform.access import get_workspace_membership
+        membership = get_workspace_membership(subscription.workspace_id, subscription.user_id)
+        definition = StrategyDefinition.query.get(subscription.strategy_id)
+        user = User.query.get(subscription.user_id)
+        if (
+            not membership or not definition or definition.workspace_id is None
+            or not user or not user.is_active or user.is_activation_expired() or not user.auto_prediction_enabled
+            or definition.workspace_id != subscription.workspace_id
+        ):
+            continue
+        if not definition.active_revision_id or definition.status != "active":
+            continue
+        if membership.role != "owner" and definition.owner_user_id != user.id and definition.visibility != "workspace":
+            continue
+        revision_id = subscription.pinned_revision_id if subscription.revision_policy == "pinned" else definition.active_revision_id
+        revision = StrategyRevision.query.get(revision_id)
+        if revision is None or revision.strategy_id != definition.id:
+            continue
+        existing = StrategyRun.query.filter_by(
+            workspace_id=subscription.workspace_id,
+            strategy_id=definition.id,
+            revision_id=revision.id,
+            subject_user_id=user.id,
+            region=region,
+            target_period=str(target_period),
+        ).first()
+        if existing and existing.status == "succeeded":
+            continue
+        spec = json.loads(revision.spec_json)
+        if region not in spec.get("regions", ["hk", "macau"]):
+            continue
+        source_snapshot = None
+        try:
+            if spec.get("kind") == "external_selection":
+                from strategy_platform.sources import load_strategy_source_snapshot
+                source_snapshot = load_strategy_source_snapshot(
+                    subscription.workspace_id,
+                    spec.get("source_key"),
+                    region,
+                    target_period,
+                    user.id,
+                )
+            zodiac_map = None
+            if spec.get("kind") == "zodiac_groups":
+                zodiac_map = lambda draw: _get_number_to_zodiac_map(ZodiacSetting.get_zodiac_year_for_date(draw.get("date")))
+            result = execute_workspace_spec(
+                spec,
+                data,
+                region,
+                target_period,
+                definition.public_id,
+                number_to_zodiac=zodiac_map,
+                source_snapshot=source_snapshot,
+            )
+        except Exception:
+            db.session.rollback()
+            failed = add_custom_strategy_run(subscription.workspace_id, definition, revision, user.id,
+                region, target_period, latest_period, {}, subscription_id=subscription.id,
+                error_code="strategy_execution_failed")
+            db.session.add(StrategyAuditEvent(workspace_id=subscription.workspace_id, actor_user_id=user.id,
+                action="strategy.run_failed", resource_type="strategy_run", resource_id=str(failed.id),
+                details_json=json.dumps({"error_code": "strategy_execution_failed"})))
+            db.session.commit()
+            continue
+
+        run = add_custom_strategy_run(
+            subscription.workspace_id,
+            definition,
+            revision,
+            user.id,
+            region,
+            target_period,
+            latest_period,
+            result,
+            subscription_id=subscription.id,
+        )
+        db.session.commit()
+        result_lines = []
+        if result.get("kind") == "zodiac_groups":
+            result_lines = [
+                f"{group.get('label')}: {'、'.join(group.get('items') or [])}"
+                for group in result.get("groups") or []
+            ]
+        elif result.get("kind") == "number_selection":
+            selection = result.get("selection") or {}
+            result_lines = [
+                f"候选号码：{', '.join(map(str, selection.get('normal') or []))}",
+                f"主选号码：{(selection.get('special') or {}).get('number', '')}",
+            ]
+        else:
+            result_lines = [
+                f"{group.get('label')}: {', '.join(map(str, group.get('items') or []))}"
+                for group in result.get("groups") or []
+            ]
+        notify_user(
+            user,
+            f"第 {target_period} 期自定义策略预测已生成",
+            "\n".join([definition.name, *result_lines]),
+            event_type="prediction_generated",
+            email_subject=f"第 {target_period} 期策略预测已生成",
+        )
+
+def generate_prediction_for_user(user, region, period, strategy, data, subscription=None):
     """为指定用户生成预测（排除 AI 策略）。
 
     未开启差异化预测时，记录落在共享哨兵 user_id 下（每期每策略只存一份）。
@@ -14566,6 +14805,17 @@ def generate_prediction_for_user(user, region, period, strategy, data):
             prediction_text=result.get('recommendation_text', '')
         )
         db.session.add(prediction)
+        strategy_result = build_strategy_result(strategy, result, target_period=period)
+        add_strategy_run(
+            strategy,
+            region,
+            period,
+            strategy_result,
+            input_cutoff=(data[0].get("id") if data else None),
+            subject_user_id=user.id if personalized_mode else None,
+            triggered_by_user_id=user.id,
+            subscription=subscription,
+        )
         db.session.commit()
         print(f"自动预测成功：为用户 {user.username} 的{region}地区第{period}期生成了{strategy}策略的预测")
         return prediction
@@ -14599,6 +14849,10 @@ def unified_predict_api():
     # 预测按当前农历生肖年取数；生肖映射仍由 /api/get_zodiacs 单独处理。
     region, strategy, year = request.args.get('region', 'hk'), request.args.get('strategy', 'balanced'), request.args.get('year', str(datetime.now().year))
     stream_response = request.args.get('stream') == '1'
+
+    descriptor = get_strategy(strategy)
+    if descriptor is None or not descriptor.enabled or not descriptor.capabilities.manual_run:
+        return jsonify({"error": "未知的预测策略", "error_type": "unknown_strategy"}), 400
 
     def _sse_event(payload):
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -14701,6 +14955,15 @@ def unified_predict_api():
             result["strategy"] = resolved_strategy
             result["requested_strategy"] = strategy
             result["prediction_zodiac_year"] = prediction_zodiac_year
+            result = attach_strategy_result(result, resolved_strategy, target_period=current_period)
+            persisted_result = get_strategy_run_result(
+                resolved_strategy,
+                region,
+                current_period,
+                subject_user_id=user_id if _personalized_predictions_enabled() else None,
+            )
+            if persisted_result is not None:
+                result["result"] = persisted_result
             result = _attach_prediction_display_copy(result, strategy, resolved_strategy)
             if stream_response and resolved_strategy == 'ai':
                 payload = {
@@ -14813,6 +15076,7 @@ def unified_predict_api():
                             "period": current_period,
                             "prediction_zodiac_year": prediction_zodiac_year,
                         })
+                        result = attach_strategy_result(result, resolved_strategy, target_period=current_period)
                         result = _attach_prediction_display_copy(result, strategy, resolved_strategy)
 
                         if user_id and is_active:
@@ -14838,6 +15102,20 @@ def unified_predict_api():
                                     )
                                 )
                                 db.session.add(prediction)
+                                strategy_result = result.get("result") or build_strategy_result(
+                                    resolved_strategy,
+                                    result,
+                                    target_period=current_period,
+                                )
+                                add_strategy_run(
+                                    resolved_strategy,
+                                    region,
+                                    current_period,
+                                    strategy_result,
+                                    input_cutoff=(data[0].get("id") if data else None),
+                                    subject_user_id=user_id if _personalized_predictions_enabled() else None,
+                                    triggered_by_user_id=user_id,
+                                )
                                 db.session.commit()
                                 result["saved"] = True
                             except Exception as e:
@@ -14914,6 +15192,12 @@ def unified_predict_api():
                 "error_type": "prediction_failed",
             }), 500
     
+    result["strategy"] = resolved_strategy
+    result["requested_strategy"] = strategy
+    result["prediction_zodiac_year"] = prediction_zodiac_year
+    result = attach_strategy_result(result, resolved_strategy, target_period=current_period)
+    result = _attach_prediction_display_copy(result, strategy, resolved_strategy)
+
     # 保存预测记录（仅对已激活用户）
     if user_id and is_active and not result.get('error'):
         try:
@@ -14933,6 +15217,15 @@ def unified_predict_api():
                 )
             )
             db.session.add(prediction)
+            add_strategy_run(
+                resolved_strategy,
+                region,
+                current_period,
+                result["result"],
+                input_cutoff=(data[0].get("id") if data else None),
+                subject_user_id=user_id if _personalized_predictions_enabled() else None,
+                triggered_by_user_id=user_id,
+            )
             db.session.commit()
         except Exception as e:
             duplicate_hint = str(e).lower()
@@ -14977,6 +15270,7 @@ def unified_predict_api():
                     if refreshed_text:
                         result["recommendation_text"] = refreshed_text
                     print(f"检测到接口重复预测记录，已返回现有记录：user={user_id}, region={region}, period={current_period}, strategy={resolved_strategy}")
+                    result = attach_strategy_result(result, resolved_strategy, target_period=current_period)
                     result = _attach_prediction_display_copy(result, strategy, resolved_strategy)
                     return jsonify(result)
             db.session.rollback()
@@ -14987,10 +15281,6 @@ def unified_predict_api():
                 "message": "保存预测记录失败，请稍后再试。"
             }), 500
     
-    result["strategy"] = resolved_strategy
-    result["requested_strategy"] = strategy
-    result["prediction_zodiac_year"] = prediction_zodiac_year
-    result = _attach_prediction_display_copy(result, strategy, resolved_strategy)
     return jsonify(result)
 
 
@@ -16357,6 +16647,16 @@ def start_async_backtest_warmup():
     return _warmup_thread
 
 
+def process_strategy_backup_outbox_job():
+    with app.app_context():
+        try:
+            from strategy_platform.backup import process_strategy_backup_outbox
+            return process_strategy_backup_outbox()
+        except Exception:
+            db.session.rollback()
+            raise RuntimeError("strategy_backup_job_failed") from None
+
+
 def start_scheduler(force=False):
     """Start the APScheduler job if enabled and not already running."""
     global _scheduler
@@ -16397,13 +16697,16 @@ def start_scheduler(force=False):
     def _log_scheduler_event(event):
         if event.code == EVENT_JOB_MISSED:
             print(f"定时任务补跑触发：{event.job_id} 原定时间已错过")
-        elif event.code == EVENT_JOB_EXECUTED:
+        elif event.code in (EVENT_JOB_EXECUTED, EVENT_JOB_ERROR):
             if event.exception:
                 print(f"定时任务执行失败：{event.job_id} {event.exception}")
+            elif event.job_id == 'strategy_github_backup_outbox':
+                if event.retval:
+                    print(f"策略 GitHub 备份队列处理完成：{event.retval} 条")
             else:
                 print(f"定时任务执行完成：{event.job_id}")
 
-    _scheduler.add_listener(_log_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_EXECUTED)
+    _scheduler.add_listener(_log_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
     _scheduler.add_job(
         collect_macau_source_data_job,
         'cron',
@@ -16439,6 +16742,14 @@ def start_scheduler(force=False):
         minute=0,
         id='cleanup_expired_data',
         misfire_grace_time=3600,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        process_strategy_backup_outbox_job,
+        'interval',
+        minutes=60,
+        id='strategy_github_backup_outbox',
+        max_instances=1,
         coalesce=True,
     )
     _scheduler.start()

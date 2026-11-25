@@ -32,13 +32,17 @@ def _draw_key(draw):
             tuple(int(n) for n in re.findall(r"\d+", str(draw.get("id") or ""))))
 
 
-def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
+def build_prediction(draws, number_to_zodiac, mapping_for_draw=None, *, window=WINDOW, parity_streak_threshold=5):
     """Use only supplied completed draws, sorted newest first.
 
     Counts include all seven balls, including repeated zodiacs. Omission uses
     all supplied history; an unseen zodiac has a lower bound, not an exact gap.
     Historical source zodiacs take precedence over date-specific fallback maps.
     """
+    if type(window) is not int or not 10 <= window <= 240:
+        raise ValueError("统计窗口须为 10 到 240 期")
+    if type(parity_streak_threshold) is not int or not 2 <= parity_streak_threshold <= 20:
+        raise ValueError("单双连开阈值须为 2 到 20 期")
     mapping = {int(n): _zodiac(z) for n, z in number_to_zodiac.items()}
     if set(mapping) != set(range(1, 50)) or not all(mapping.values()):
         raise ValueError("生肖号码映射不完整")
@@ -76,9 +80,9 @@ def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
         history.append({"period": period, "normal": normal, "special": special,
                         "normal_zodiacs": normal_zodiacs, "special_zodiac": special_zodiac})
 
-    if len(history) < WINDOW:
-        raise ValueError(f"生肖遗漏回补需要至少 {WINDOW} 期完整开奖记录，当前仅 {len(history)} 期")
-    recent = history[:WINDOW]
+    if len(history) < window:
+        raise ValueError(f"生肖遗漏回补需要至少 {window} 期完整开奖记录，当前仅 {len(history)} 期")
+    recent = history[:window]
     total_counts = Counter(z for d in recent for z in d["normal_zodiacs"] + [d["special_zodiac"]])
     special_counts = Counter(d["special_zodiac"] for d in recent)
     latest_normal = Counter(history[0]["normal_zodiacs"])
@@ -94,7 +98,7 @@ def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
         if draw["special"] % 2 != last_parity:
             break
         streak += 1
-    preferred = ("even" if last_parity else "odd") if streak >= 5 else None
+    preferred = ("even" if last_parity else "odd") if streak >= parity_streak_threshold else None
 
     # Fixed zodiac order is the last tie-breaker, so identical input is stable.
     overdue = sorted(ZODIACS, key=lambda z: (-omissions[z], -total_counts[z], ZODIACS.index(z)))[:4]
@@ -108,7 +112,7 @@ def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
         return (
             -abs(odd - 2) - abs(even - 2),
             sum(z in overdue[:2] for z in combo),
-            sum(latest_normal[z] >= 2 and omissions[z] >= WINDOW // 2 for z in combo),
+            sum(latest_normal[z] >= 2 and omissions[z] >= window // 2 for z in combo),
             -sum(latest_total[z] == 0 for z in combo if z not in overdue[:2]),
             sum(total_counts[z] for z in combo),
             sum(omissions[z] for z in combo),
@@ -123,7 +127,7 @@ def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
         if z in overdue:
             reasons.append(f"特码遗漏 {gap} 期，列遗漏前四")
         if z in defensive:
-            reasons.append(f"近 {WINDOW} 期总频次 {total_counts[z]} 次，列其余生肖前二")
+            reasons.append(f"近 {window} 期总频次 {total_counts[z]} 次，列其余生肖前二")
         if latest_normal[z] >= 2:
             reasons.append(f"上期正码出现 {latest_normal[z]} 次")
         if latest_total[z] == 0:
@@ -145,7 +149,7 @@ def build_prediction(draws, number_to_zodiac, mapping_for_draw=None):
     special = candidates[0]
     normal = [next(n for n in sorted(groups[z], key=number_rank) if n != special) for z in six]
     analysis = {
-        "version": 1, "window": WINDOW, "history_count": len(history),
+        "version": 1, "window": window, "history_count": len(history),
         "source_period": history[0]["period"], "six_zodiacs": six, "four_zodiacs": four,
         "overdue_zodiacs": overdue, "defensive_zodiacs": defensive,
         "six_numbers": six_numbers, "four_numbers": four_numbers,

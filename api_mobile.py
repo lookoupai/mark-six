@@ -17,6 +17,7 @@ from models import (
     LotteryDraw,
     ManualBetRecord,
     PredictionRecord,
+    SHARED_PREDICTION_USER_ID,
     SystemConfig,
     User,
     ZodiacSetting,
@@ -39,12 +40,15 @@ from security_policy import (
     LOGIN_FAILURE_WINDOW_SECONDS,
     password_policy_error,
 )
+from strategy_platform.catalog import get_strategy_catalog, get_strategy_keys
+from strategy_platform.results import build_strategy_result
+from strategy_platform.service import get_strategy_run_result
 
 
 mobile_api_bp = Blueprint("mobile_api", __name__, url_prefix="/api/mobile")
 
-STRATEGY_KEYS = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "ai", "zodiac_rebound"]
-LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "zodiac_rebound"]
+STRATEGY_KEYS = get_strategy_keys()
+LOCAL_STRATEGIES = get_strategy_keys(kind="builtin")
 _RED_BALLS = {1, 2, 7, 8, 12, 13, 18, 19, 23, 24, 29, 30, 34, 35, 40, 45, 46}
 _BLUE_BALLS = {3, 4, 9, 10, 14, 15, 20, 25, 26, 31, 36, 37, 41, 42, 47, 48}
 _RATE_LIMITS = {}
@@ -337,10 +341,12 @@ def _rate_limited(key, limit, window_seconds):
 
 
 def _get_mobile_csrf_token():
-    token = session.get("_mobile_csrf_token")
+    token = session.get("_csrf_token") or session.get("_mobile_csrf_token")
     if not token:
         token = secrets.token_urlsafe(32)
-        session["_mobile_csrf_token"] = token
+    # Mobile and web share the same authenticated V2 strategy API.
+    session["_csrf_token"] = token
+    session["_mobile_csrf_token"] = token
     return token
 
 
@@ -1938,6 +1944,17 @@ def api_update_data():
         return _json_error(f"更新失败: {e}", status=500, code="update_failed")
 
 
+@mobile_api_bp.route("/strategy-catalog", methods=["GET"])
+def api_strategy_catalog():
+    user, error = _require_active_user()
+    if error:
+        return error
+    return jsonify({
+        "success": True,
+        "items": get_strategy_catalog(capability="manual_run"),
+    })
+
+
 @mobile_api_bp.route("/predictions", methods=["GET"])
 def api_predictions():
     user, error = _require_active_user()
@@ -2114,6 +2131,32 @@ def api_predictions():
             if record.created_at
             else None,
         }
+        strategy_result = None
+        if record.strategy in STRATEGY_KEYS:
+            subject_user_id = (
+                record.user_id
+                if record.user_id != SHARED_PREDICTION_USER_ID
+                else None
+            )
+            strategy_result = get_strategy_run_result(
+                record.strategy,
+                record.region,
+                record.period,
+                subject_user_id=subject_user_id,
+            )
+            if strategy_result is None:
+                strategy_result = build_strategy_result(
+                    record.strategy,
+                    {
+                        "normal": normal_numbers,
+                        "special": {"number": record.special_number, "sno_zodiac": mapped_special},
+                        "model_meta": _safe_json_loads(getattr(record, "prediction_metadata", None)),
+                        "recommendation_text": getattr(record, "prediction_text", ""),
+                    },
+                    target_period=record.period,
+                )
+        if strategy_result:
+            item["strategy_result"] = strategy_result
         if record.strategy == "zodiac_rebound":
             item["zodiac_groups"] = record.zodiac_groups
         if include_details:

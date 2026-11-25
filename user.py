@@ -1,5 +1,5 @@
 ﻿from flask import Blueprint, render_template, request, redirect, url_for, flash, session, jsonify
-from models import db, User, PredictionRecord, SystemConfig, InviteCode, BacktestRun, UserNotification, LotteryDraw, MacauCollectedData, ZodiacSetting, prediction_scope_user_ids, PREDICTION_HIT_BASELINES, build_coverage_recommendation
+from models import db, User, PredictionRecord, SystemConfig, InviteCode, BacktestRun, UserNotification, LotteryDraw, MacauCollectedData, ZodiacSetting, StrategyWorkspace, StrategyWorkspaceMembership, prediction_scope_user_ids, PREDICTION_HIT_BASELINES, build_coverage_recommendation
 from sqlalchemy import func, case
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta, timezone
@@ -19,6 +19,10 @@ from notification_service import cleanup_expired_station_notifications, get_user
 from html_sanitizer import looks_like_rich_notification, sanitize_html
 from security_policy import password_policy_error
 from auth import _github_login_enabled, _create_email_change_token, _clear_email_change_token, send_email_change_verification
+from strategy_platform.catalog import get_strategy_keys, get_strategy_menu_meta
+from strategy_platform.access import get_default_workspace_for_owner, get_workspace_membership
+from strategy_platform.legacy import sync_legacy_user_subscriptions
+from strategy_platform.sources import capture_macau_collection_snapshots
 
 user_bp = Blueprint('user', __name__, url_prefix='/user')
 
@@ -280,21 +284,10 @@ def _format_notification_item(item):
     }
 
 
-STRATEGY_META = [
-    {"key": "zodiac_rebound", "label": "生肖遗漏回补", "icon": "🐾"},
-    {"key": "hot", "label": "热门", "icon": "🔥"},
-    {"key": "cold", "label": "冷门", "icon": "🧊"},
-    {"key": "trend", "label": "走势", "icon": "📈"},
-    {"key": "hybrid", "label": "综合", "icon": "♻️"},
-    {"key": "balanced", "label": "均衡", "icon": "⚖️"},
-    {"key": "ml", "label": "机器学习", "icon": "🧪"},
-    {"key": "ai", "label": "AI", "icon": "🤖"},
-]
-STRATEGY_META.insert(5, {"key": "markov", "label": "马尔科夫", "icon": "🔗"})
-STRATEGY_KEYS = [item["key"] for item in STRATEGY_META]
-AUTO_STRATEGY_META = [item for item in STRATEGY_META if item["key"] != "ai"]
-
-LOCAL_STRATEGIES = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml", "zodiac_rebound"]
+STRATEGY_META = get_strategy_menu_meta()
+STRATEGY_KEYS = get_strategy_keys()
+AUTO_STRATEGY_META = get_strategy_menu_meta(capability="scheduled_run")
+LOCAL_STRATEGIES = get_strategy_keys(kind="builtin")
 
 MARKOV_LEARNING_DEFAULT_CONFIG = {
     "window": 80,
@@ -805,7 +798,7 @@ def _build_learning_comparison():
 
     def _latest_two_backtest_records(region):
         records = (
-            BacktestRun.query.filter_by(region=region)
+            BacktestRun.query.filter(db.or_(BacktestRun.strategies.is_(None), BacktestRun.strategies != "rule_dsl")).filter_by(region=region)
             .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
             .limit(8)
             .all()
@@ -915,7 +908,7 @@ def _latest_backtest_summary(limit=6):
 
     for region_key, region_label in region_order:
         record = (
-            BacktestRun.query.filter_by(region=region_key)
+            BacktestRun.query.filter(db.or_(BacktestRun.strategies.is_(None), BacktestRun.strategies != "rule_dsl")).filter_by(region=region_key)
             .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
             .first()
         )
@@ -959,7 +952,7 @@ def _latest_backtest_summary(limit=6):
         })
 
     extra_records = (
-        BacktestRun.query.order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
+        BacktestRun.query.filter(db.or_(BacktestRun.strategies.is_(None), BacktestRun.strategies != "rule_dsl")).order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
         .limit(limit)
         .all()
     )
@@ -996,7 +989,7 @@ def _latest_unique_backtest_summary(limit=6):
 
     for region_key, region_label in region_order:
         record = (
-            BacktestRun.query.filter_by(region=region_key)
+            BacktestRun.query.filter(db.or_(BacktestRun.strategies.is_(None), BacktestRun.strategies != "rule_dsl")).filter_by(region=region_key)
             .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
             .first()
         )
@@ -1217,6 +1210,7 @@ def _save_macau_collection_items(year, items):
     created_count = 0
     updated_count = 0
     skipped_count = 0
+    changed_records = []
     for item in items:
         period = item.get('period')
         if not period:
@@ -1234,19 +1228,25 @@ def _save_macau_collection_items(year, items):
                 changed = True
             if changed:
                 updated_count += 1
+                changed_records.append(record)
             else:
                 skipped_count += 1
             continue
         else:
-            db.session.add(MacauCollectedData(
+            record = MacauCollectedData(
                 region='macau',
                 year=int(year),
                 source_period=str(item.get('source_period') or ''),
                 period=period,
                 numbers=numbers,
                 zodiacs=zodiacs,
-            ))
+            )
+            db.session.add(record)
+            changed_records.append(record)
             created_count += 1
+    if changed_records:
+        db.session.flush()
+        capture_macau_collection_snapshots(changed_records)
     db.session.commit()
     return created_count, updated_count, skipped_count
 
@@ -1465,6 +1465,7 @@ def dashboard():
         return redirect(url_for('auth.login'))
     if _sanitize_auto_prediction_strategies(user):
         try:
+            sync_legacy_user_subscriptions(user)
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -1587,6 +1588,80 @@ def dashboard():
                           get_number_color=get_number_color,
                           get_number_zodiac=get_number_zodiac,
                           github_login_enabled=_github_login_enabled())
+
+
+@user_bp.route('/strategy-workspace')
+@active_required
+def strategy_workspace():
+    user = _get_session_user()
+    if not user:
+        flash('请先登录', 'error')
+        return redirect(url_for('auth.login'))
+    get_default_workspace_for_owner(user)
+    memberships = StrategyWorkspaceMembership.query.join(
+        StrategyWorkspace, StrategyWorkspace.id == StrategyWorkspaceMembership.workspace_id,
+    ).filter(StrategyWorkspaceMembership.user_id == user.id,
+             StrategyWorkspaceMembership.status == "active", StrategyWorkspace.status == "active").all()
+    requested = request.args.get("workspace_id", type=int)
+    membership = next((item for item in memberships if item.workspace_id == requested), None) if requested else (
+        memberships[0] if memberships else None)
+    if membership is None:
+        flash('你还没有加入此策略工作区，请联系工作区管理员授权。', 'info')
+        return redirect(url_for('user.dashboard'))
+    workspace = db.session.get(StrategyWorkspace, membership.workspace_id)
+    workspaces = [{"id": item.workspace_id, "name": db.session.get(StrategyWorkspace, item.workspace_id).name,
+                   "role": item.role} for item in memberships]
+    return render_template('user/strategy_workspace.html', user=user, workspace=workspace,
+                           membership=membership, workspaces=workspaces)
+
+
+
+@user_bp.route('/strategy-assistant')
+@active_required
+def strategy_assistant():
+    from models import StrategyDefinition, StrategyChatSession
+
+    user = _get_session_user()
+    if not user:
+        return redirect(url_for('auth.login'))
+    get_default_workspace_for_owner(user)
+    memberships = StrategyWorkspaceMembership.query.join(
+        StrategyWorkspace, StrategyWorkspace.id == StrategyWorkspaceMembership.workspace_id,
+    ).filter(StrategyWorkspaceMembership.user_id == user.id,
+             StrategyWorkspaceMembership.status == "active", StrategyWorkspace.status == "active",
+             StrategyWorkspaceMembership.role.in_(("owner", "strategy_author"))).all()
+    requested = request.args.get("workspace_id", type=int)
+    membership = next((item for item in memberships if item.workspace_id == requested), None) if requested else (memberships[0] if memberships else None)
+    if membership is None:
+        flash('策略助手需要工作区所有者或策略作者权限。', 'info')
+        return redirect(url_for('user.strategy_workspace'))
+    workspace = db.session.get(StrategyWorkspace, membership.workspace_id)
+    session_id = request.args.get("session_id", type=int)
+    strategy_id = str(request.args.get("strategy_id") or "").strip()
+    if session_id:
+        chat = StrategyChatSession.query.filter_by(id=session_id, workspace_id=workspace.id, user_id=user.id).first()
+        if chat is None:
+            return '没有此对话权限', 403
+        if chat.strategy_id:
+            definition = db.session.get(StrategyDefinition, chat.strategy_id)
+            if not definition or definition.workspace_id != workspace.id or definition.owner_user_id != user.id:
+                return '没有此策略对话权限', 403
+            if strategy_id and strategy_id != definition.public_id:
+                return '对话与所选策略不一致', 400
+            strategy_id = definition.public_id
+        elif strategy_id:
+            return '对话与所选策略不一致', 400
+    elif strategy_id:
+        definition = StrategyDefinition.query.filter_by(public_id=strategy_id, workspace_id=workspace.id,
+                                                         owner_user_id=user.id, status="active").first()
+        if definition is None:
+            return '没有此策略编辑权限', 403
+    workspaces = [{"id": item.workspace_id, "name": db.session.get(StrategyWorkspace, item.workspace_id).name}
+                  for item in memberships]
+    return render_template('user/strategy_assistant.html', user=user, workspace=workspace,
+        assistant_config={"workspace_id": workspace.id, "strategy_id": strategy_id or None,
+                          "session_id": session_id, "new_session": request.args.get("new") == "1"},
+        workspaces=workspaces)
 
 
 @user_bp.route('/data-statistics')
@@ -2179,7 +2254,7 @@ def _get_markov_panel_data():
     regions = {}
     try:
         records = (
-            BacktestRun.query.filter(BacktestRun.name.like("auto-%"))
+            BacktestRun.query.filter(db.or_(BacktestRun.strategies.is_(None), BacktestRun.strategies != "rule_dsl")).filter(BacktestRun.name.like("auto-%"))
             .order_by(BacktestRun.created_at.desc(), BacktestRun.id.desc())
             .limit(12)
             .all()
@@ -2567,6 +2642,7 @@ def predictions():
                           start_date=start_date,
                           end_date=end_date,
                           strategy=strategy,
+                          strategy_labels={item["key"]: item["label"] for item in STRATEGY_META},
                           result=result,
                           get_number_color=get_number_color,
                           get_number_zodiac=get_number_zodiac_cached,
@@ -3250,6 +3326,7 @@ def save_prediction_settings():
     user.show_normal_numbers = show_normal_numbers
 
     try:
+        sync_legacy_user_subscriptions(user)
         db.session.commit()
         flash('预测设置保存成功', 'success')
     except Exception as e:
@@ -3291,6 +3368,7 @@ def update_auto_prediction():
         user.auto_prediction_strategies = ','.join(valid_strategies)
         user.auto_prediction_regions = ','.join(valid_regions)
         user.show_normal_numbers = show_normal_numbers
+        sync_legacy_user_subscriptions(user)
 
         db.session.commit()
         flash('自动预测设置保存成功', 'success')

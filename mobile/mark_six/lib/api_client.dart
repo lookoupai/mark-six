@@ -11,6 +11,11 @@ import 'config.dart';
 class ApiClient {
   ApiClient._();
 
+  ApiClient.withTransport(Dio transport) {
+    _dio = transport;
+    _initialized = true;
+  }
+
   static final ApiClient instance = ApiClient._();
 
   late final Dio _dio;
@@ -206,6 +211,105 @@ class ApiClient {
   /// 澳门采集五码五肖（只展示，不写入预测记录）
   Future<Map<String, dynamic>> macauFiveZodiac() async {
     final response = await get('/api/macau_five_zodiac');
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> strategyCatalog() async {
+    final response = await get('/api/mobile/strategy-catalog');
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> strategyWorkspaces() async {
+    final response = await get('/api/v2/workspaces');
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> workspaceStrategies(int workspaceId) async {
+    final response = await get('/api/v2/workspaces/$workspaceId/strategies');
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> runWorkspaceStrategy({
+    required int workspaceId,
+    required String strategyId,
+    required String region,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/strategies/$strategyId/runs',
+      data: {'region': region},
+    );
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> strategyRuns(int workspaceId, String strategyId) async {
+    return _ensureJsonMap((await get('/api/v2/workspaces/$workspaceId/strategies/$strategyId/runs')).data);
+  }
+
+  Future<Map<String, dynamic>> subscribeStrategy({required int workspaceId,
+    required String strategyId, required String region, required bool scheduled}) async {
+    return _ensureJsonMap((await post('/api/v2/workspaces/$workspaceId/strategies/$strategyId/subscriptions',
+        data: {'run_mode': scheduled ? 'scheduled' : 'manual', 'regions': [region]})).data);
+  }
+
+  Future<Map<String, dynamic>> unsubscribeStrategy(int workspaceId, String strategyId) async {
+    return _ensureJsonMap((await delete('/api/v2/workspaces/$workspaceId/strategies/$strategyId/subscriptions')).data);
+  }
+
+  Future<Map<String, dynamic>> cloneBuiltinStrategy({
+    required int workspaceId,
+    required String strategyKey,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/builtin-strategies/$strategyKey/clone',
+      data: const {},
+    );
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> createStrategyChatSession({
+    required int workspaceId,
+    String? strategyId,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/strategy-assistant/sessions',
+      data: {'strategy_id': strategyId ?? ''},
+    );
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> sendStrategyChatMessage({
+    required int workspaceId,
+    required int sessionId,
+    required String message,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/strategy-assistant/sessions/$sessionId/messages',
+      data: {'message': message},
+    );
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> backtestStrategyProposal({
+    required int workspaceId,
+    required int proposalId,
+    required String region,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/strategy-proposals/$proposalId/backtests',
+      data: {'region': region},
+    );
+    return _ensureJsonMap(response.data);
+  }
+
+  Future<Map<String, dynamic>> publishStrategyProposal({
+    required int workspaceId,
+    required int proposalId,
+    int? expectedRevisionId,
+  }) async {
+    final response = await post(
+      '/api/v2/workspaces/$workspaceId/strategy-proposals/$proposalId/publish',
+      data: {'expected_revision_id': expectedRevisionId, 'confirm': true},
+    );
     return _ensureJsonMap(response.data);
   }
 

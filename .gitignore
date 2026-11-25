@@ -24,3 +24,8 @@ build/
 *.lock
 tmp/
 .DS_Store
+
+# Local verification tools and reports
+node_modules/
+.coverage*
+htmlcov/

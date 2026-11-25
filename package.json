@@ -1,0 +1,11 @@
+{
+  "name": "mark-six-browser-verification",
+  "private": true,
+  "scripts": {
+    "test:e2e": "node tests/strategy_workspace_e2e.cjs",
+    "browser:install": "playwright-core install --with-deps chromium"
+  },
+  "devDependencies": {
+    "playwright-core": "1.65.1"
+  }
+}

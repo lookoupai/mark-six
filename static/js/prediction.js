@@ -775,13 +775,21 @@ function displayPrediction(data, strategy) {
     const showReferenceNumbers = shouldShowNormalNumbers();
 
     // Render the primary zodiac result even when reference numbers are hidden.
-    const zodiacAnalysis = (data.model_meta || {}).zodiac_rebound;
-    if (zodiacAnalysis) {
+    const structuredGroups = data.result && data.result.kind === 'zodiac_groups'
+        ? data.result.groups : null;
+    const legacyZodiacAnalysis = (data.model_meta || {}).zodiac_rebound;
+    if (structuredGroups || legacyZodiacAnalysis) {
         const safeZodiacs = values => (Array.isArray(values) ? values : [])
             .filter(value => /^[鼠牛虎兔龙蛇马羊猴鸡狗猪]$/.test(value)).join(' · ');
+        const six = structuredGroups
+            ? structuredGroups.find(group => group.id === 'six')?.items
+            : legacyZodiacAnalysis.six_zodiacs;
+        const four = structuredGroups
+            ? structuredGroups.find(group => group.id === 'four')?.items
+            : legacyZodiacAnalysis.four_zodiacs;
         html += `<div style="padding:16px; margin-bottom:16px; border:1px solid rgba(148,163,184,.25); border-radius:10px; color:#f8fafc; text-align:center;">
-            <div>综合六肖</div><div style="font-size:1.3rem; font-weight:700; margin:8px 0 16px;">${safeZodiacs(zodiacAnalysis.six_zodiacs)}</div>
-            <div>精选四肖</div><div style="font-size:1.3rem; font-weight:700; margin-top:8px;">${safeZodiacs(zodiacAnalysis.four_zodiacs)}</div>
+            <div>综合六肖</div><div style="font-size:1.3rem; font-weight:700; margin:8px 0 16px;">${safeZodiacs(six)}</div>
+            <div>精选四肖</div><div style="font-size:1.3rem; font-weight:700; margin-top:8px;">${safeZodiacs(four)}</div>
         </div>`;
     }
 

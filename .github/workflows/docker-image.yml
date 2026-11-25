@@ -7,7 +7,10 @@ on:
     branches: [ "master" ]
 
 jobs:
+  validate:
+    uses: ./.github/workflows/validation.yml
   build:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read

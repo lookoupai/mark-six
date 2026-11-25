@@ -332,15 +332,9 @@
                 </select>
                 <select name="strategy" class="compact-select" title="预测策略">
                     <option value="">全部策略</option>
-                    <option value="hot" {% if request.args.get('strategy') == 'hot' %}selected{% endif %}>热门预测</option>
-                    <option value="cold" {% if request.args.get('strategy') == 'cold' %}selected{% endif %}>冷门预测</option>
-                    <option value="trend" {% if request.args.get('strategy') == 'trend' %}selected{% endif %}>走势预测</option>
-                    <option value="zodiac_rebound" {% if request.args.get('strategy') == 'zodiac_rebound' %}selected{% endif %}>生肖遗漏回补</option>
-                    <option value="hybrid" {% if request.args.get('strategy') == 'hybrid' %}selected{% endif %}>综合预测</option>
-                    <option value="balanced" {% if request.args.get('strategy') == 'balanced' %}selected{% endif %}>均衡预测</option>
-                    <option value="markov" {% if request.args.get('strategy') == 'markov' %}selected{% endif %}>马尔科夫预测</option>
-                    <option value="ml" {% if request.args.get('strategy') == 'ml' %}selected{% endif %}>机器学习预测</option>
-                    <option value="ai" {% if request.args.get('strategy') == 'ai' %}selected{% endif %}>AI智能</option>
+                    {% for strategy_key, strategy_label in strategy_labels.items() %}
+                    <option value="{{ strategy_key }}" {% if request.args.get('strategy') == strategy_key %}selected{% endif %}>{{ strategy_label }}</option>
+                    {% endfor %}
                 </select>
                 <select name="result" class="compact-select" title="预测结果">
                     <option value="">全部结果</option>

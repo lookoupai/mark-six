@@ -7,6 +7,8 @@
     <div class="card-header">
         <h2 class="card-title">👥 管理用户</h2>
         <div style="display: flex; gap: 1rem;">
+            <a class="btn" href="{{ url_for('admin.strategy_workspaces') }}">工作区管理 / GitHub 备份</a>
+            <button type="button" class="btn btn-primary" onclick="showCreateWorkspaceModal()">+ 创建策略分组</button>
             <a href="#" class="btn" onclick="showAddUserModal()">+ 添加用户</a>
         </div>
     </div>
@@ -38,6 +40,7 @@
                     <th>注册时间</th>
                     <th>有效期至</th>
                     <th>邀请人</th>
+                    <th>策略分组</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -75,7 +78,18 @@
                     </td>
                     <td>{{ user.invited_by or '-' }}</td>
                     <td>
+                        {% set group_names = user_workspace_names.get(user.id, []) %}
+                        {% if group_names %}
+                            <div class="workspace-chip-list">
+                                {% for group_name in group_names %}<span class="workspace-chip">{{ group_name }}</span>{% endfor %}
+                            </div>
+                        {% else %}
+                            <span style="color: #64748b;">未分组</span>
+                        {% endif %}
+                    </td>
+                    <td>
                         <div style="display: flex; gap: 0.5rem;">
+                            <button type="button" class="btn btn-sm" onclick="showWorkspaceModal({{ user.id }})">设置分组</button>
                             {% if user.is_active %}
                                 <button class="btn btn-danger btn-sm" onclick="deactivateUser({{ user.id }})">停用</button>
                             {% else %}
@@ -111,6 +125,56 @@
         共 {{ users.total }} 位用户
     </div>
     {% endif %}
+</div>
+
+<!-- 用户策略分组模态框 -->
+<div id="strategyWorkspaceModal" class="workspace-modal" style="display: none;">
+    <div class="workspace-modal-panel">
+        <div class="workspace-modal-header">
+            <div>
+                <h3>设置用户分组</h3>
+                <p id="workspaceModalUsername" class="workspace-modal-subtitle"></p>
+            </div>
+            <button type="button" class="workspace-close" onclick="hideWorkspaceModal()" aria-label="关闭">×</button>
+        </div>
+        <div id="workspaceMembershipList" class="workspace-list">正在加载分组…</div>
+        <div class="workspace-modal-actions">
+            <button type="button" class="btn" onclick="showCreateWorkspaceModal()">新建分组</button>
+            <a class="btn" href="{{ url_for('admin.strategy_workspaces') }}">重命名 / 备份设置</a>
+            <span style="flex: 1;"></span>
+            <button type="button" class="btn btn-danger" onclick="hideWorkspaceModal()">取消</button>
+            <button type="button" class="btn btn-primary" onclick="saveWorkspaceMemberships()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- 创建策略分组模态框 -->
+<div id="createWorkspaceModal" class="workspace-modal" style="display: none;">
+    <div class="workspace-modal-panel workspace-create-panel">
+        <div class="workspace-modal-header">
+            <div>
+                <h3>创建策略分组</h3>
+                <p class="workspace-modal-subtitle">创建后，你将成为该工作区所有者。</p>
+            </div>
+            <button type="button" class="workspace-close" onclick="hideCreateWorkspaceModal()" aria-label="关闭">×</button>
+        </div>
+        <form id="createWorkspaceForm">
+            <div class="form-group">
+                <label for="newWorkspaceName">分组名称</label>
+                <input id="newWorkspaceName" name="name" class="form-control" maxlength="120" required placeholder="例如：研发组">
+            </div>
+            <div class="form-group">
+                <label for="newWorkspaceSlug">分组标识</label>
+                <input id="newWorkspaceSlug" name="slug" class="form-control" maxlength="80" pattern="[a-z0-9][a-z0-9_-]{0,79}" required placeholder="例如：research-team">
+                <small>使用小写字母、数字、短横线或下划线；创建后保持稳定。</small>
+            </div>
+            <div class="workspace-modal-actions">
+                <span style="flex: 1;"></span>
+                <button type="button" class="btn btn-danger" onclick="hideCreateWorkspaceModal()">取消</button>
+                <button type="submit" class="btn btn-primary">创建分组</button>
+            </div>
+        </form>
+    </div>
 </div>
 
 <!-- 添加用户模态框 -->
@@ -169,6 +233,152 @@
 </div>
 
 <script>
+let activeWorkspaceUserId = null;
+let activeWorkspaceUsername = '';
+
+function showCreateWorkspaceModal() {
+    document.getElementById('createWorkspaceModal').style.display = 'flex';
+    document.getElementById('newWorkspaceName').focus();
+}
+
+function hideCreateWorkspaceModal() {
+    document.getElementById('createWorkspaceModal').style.display = 'none';
+    document.getElementById('createWorkspaceForm').reset();
+}
+
+function hideWorkspaceModal() {
+    document.getElementById('strategyWorkspaceModal').style.display = 'none';
+    activeWorkspaceUserId = null;
+    activeWorkspaceUsername = '';
+}
+
+async function loadWorkspaceMemberships(userId) {
+    const list = document.getElementById('workspaceMembershipList');
+    list.replaceChildren();
+    const loading = document.createElement('div');
+    loading.className = 'workspace-empty-state';
+    loading.textContent = '正在加载分组…';
+    list.appendChild(loading);
+    try {
+        const response = await fetch(`/admin/strategy-workspaces/users/${userId}`);
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || '加载分组失败');
+        renderWorkspaceMemberships(data.workspaces || []);
+    } catch (error) {
+        list.replaceChildren();
+        const message = document.createElement('div');
+        message.className = 'workspace-empty-state workspace-error';
+        message.textContent = error.message || '加载分组失败';
+        list.appendChild(message);
+    }
+}
+
+function renderWorkspaceMemberships(workspaces) {
+    const list = document.getElementById('workspaceMembershipList');
+    list.replaceChildren();
+    if (!workspaces.length) {
+        const empty = document.createElement('div');
+        empty.className = 'workspace-empty-state';
+        empty.textContent = '暂无策略分组，请先创建一个分组。';
+        list.appendChild(empty);
+        return;
+    }
+
+    workspaces.forEach(workspace => {
+        const row = document.createElement('div');
+        row.className = 'workspace-option';
+        row.dataset.workspaceId = workspace.id;
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = workspace.status === 'active';
+        checkbox.className = 'workspace-membership-checkbox';
+        const isOwner = workspace.status === 'active' && workspace.role === 'owner';
+        checkbox.disabled = isOwner;
+
+        const label = document.createElement('div');
+        label.className = 'workspace-option-info';
+        const name = document.createElement('strong');
+        name.textContent = workspace.name;
+        const slug = document.createElement('small');
+        slug.textContent = workspace.slug;
+        label.append(name, slug);
+
+        const role = document.createElement('select');
+        role.className = 'form-control workspace-role-select';
+        role.innerHTML = '<option value="member">成员</option><option value="strategy_author">策略作者</option><option value="owner">所有者</option>';
+        role.value = isOwner ? 'owner' : (workspace.role === 'strategy_author' ? 'strategy_author' : 'member');
+        role.disabled = isOwner || !checkbox.checked;
+        checkbox.addEventListener('change', () => { role.disabled = !checkbox.checked || isOwner; });
+
+        if (workspace.status === 'removed') {
+            const status = document.createElement('small');
+            status.className = 'workspace-removed-label';
+            status.textContent = '已移出';
+            label.appendChild(status);
+        }
+        row.append(checkbox, label, role);
+        list.appendChild(row);
+    });
+}
+
+async function showWorkspaceModal(userId) {
+    activeWorkspaceUserId = userId;
+    const userRow = document.querySelector(`tr[data-user-id="${userId}"]`);
+    activeWorkspaceUsername = userRow ? userRow.querySelector('td:nth-child(2)').textContent.trim() : '';
+    document.getElementById('workspaceModalUsername').textContent = activeWorkspaceUsername;
+    document.getElementById('strategyWorkspaceModal').style.display = 'flex';
+    await loadWorkspaceMemberships(userId);
+}
+
+async function saveWorkspaceMemberships() {
+    if (!activeWorkspaceUserId) return;
+    const memberships = [];
+    document.querySelectorAll('#workspaceMembershipList .workspace-option').forEach(row => {
+        const checkbox = row.querySelector('.workspace-membership-checkbox');
+        if (checkbox.checked) {
+            memberships.push({
+                workspace_id: Number(row.dataset.workspaceId),
+                role: row.querySelector('.workspace-role-select').value,
+            });
+        }
+    });
+    try {
+        const response = await fetch(`/admin/strategy-workspaces/users/${activeWorkspaceUserId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({memberships}),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || '保存分组失败');
+        location.reload();
+    } catch (error) {
+        alert(error.message || '保存分组失败');
+    }
+}
+
+document.getElementById('createWorkspaceForm').addEventListener('submit', async function(event) {
+    event.preventDefault();
+    const formData = new FormData(this);
+    try {
+        const response = await fetch('/admin/strategy-workspaces/create', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: formData.get('name'), slug: formData.get('slug')}),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.message || '创建分组失败');
+        hideCreateWorkspaceModal();
+        if (activeWorkspaceUserId) {
+            await loadWorkspaceMemberships(activeWorkspaceUserId);
+        } else {
+            location.reload();
+        }
+    } catch (error) {
+        alert(error.message || '创建分组失败');
+    }
+});
+
 function showAddUserModal() {
     document.getElementById('addUserModal').style.display = 'block';
 }
@@ -323,6 +533,91 @@ document.getElementById('resetPasswordForm').addEventListener('submit', function
 </script>
 
 <style>
+.workspace-chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    min-width: 130px;
+}
+
+.workspace-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+.workspace-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10010;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(15, 23, 42, 0.58);
+}
+
+.workspace-modal-panel {
+    width: min(680px, 96vw);
+    max-height: min(82vh, 760px);
+    overflow: auto;
+    padding: 1.4rem;
+    border-radius: 16px;
+    background: #172033;
+    color: #f8fafc;
+    border: 1px solid #475569;
+    color-scheme: dark;
+    box-shadow: 0 24px 64px rgba(2, 6, 23, 0.4);
+}
+
+.workspace-create-panel { width: min(500px, 96vw); }
+
+.workspace-modal-header,
+.workspace-modal-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.workspace-modal-header { justify-content: space-between; margin-bottom: 1rem; }
+.workspace-modal-header h3 { margin: 0; color: #f8fafc; }
+.workspace-modal-subtitle { margin: 0.35rem 0 0; color: #cbd5e1; }
+.workspace-close { border: 0; background: transparent; color: #e2e8f0; font-size: 1.7rem; cursor: pointer; }
+.workspace-list { display: grid; gap: 0.55rem; }
+
+.workspace-option {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) minmax(140px, 190px);
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.8rem;
+    border: 1px solid #475569;
+    background: #1e293b;
+    color: #f8fafc;
+    border-radius: 10px;
+}
+
+.workspace-option-info strong { color: #f8fafc; }
+.workspace-option-info { display: grid; gap: 0.15rem; min-width: 0; }
+.workspace-option-info small { color: #cbd5e1; overflow-wrap: anywhere; }
+.workspace-removed-label { color: #b45309 !important; }
+.workspace-empty-state { padding: 1.5rem; text-align: center; color: #cbd5e1; }
+.workspace-error { color: #fda4af; }
+.workspace-modal-panel .form-control { background: #0f172a; color: #f8fafc; border-color: #64748b; }
+.workspace-modal-panel small { color: #cbd5e1; }
+.workspace-modal-actions { justify-content: flex-end; margin-top: 1.2rem; }
+
+@media (max-width: 600px) {
+    .workspace-option { grid-template-columns: auto minmax(0, 1fr); }
+    .workspace-role-select { grid-column: 2; width: 100%; }
+    .workspace-modal-actions { flex-wrap: wrap; }
+}
+
 /* 状态标签样式 */
 .invite-status {
     display: inline-block;

@@ -1,6 +1,8 @@
 # Flutter/Dart/Pub
 .dart_tool/
 .packages
+.flutter-plugins-dependencies
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 pubspec.lock
 
 # Flutter build

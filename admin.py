@@ -3,6 +3,7 @@ from functools import wraps
 from urllib.parse import urlparse
 from security_policy import password_policy_error
 import requests
+import os
 from models import (
     db,
     User,
@@ -14,8 +15,23 @@ from models import (
     InviteCode,
     ZodiacSetting,
     ManualBetRecord,
+    MacauCollectedData,
     LotteryDraw,
     BacktestRun,
+    StrategyWorkspace,
+    StrategyWorkspaceMembership,
+    StrategyDefinition,
+    StrategyRevision,
+    StrategySubscription,
+    StrategyRun,
+    StrategyChatSession,
+    StrategyChatMessage,
+    StrategyProposal,
+    StrategyAuditEvent,
+    StrategyBackupDestination,
+    StrategyBackupOutbox,
+    StrategySourceDefinition,
+    StrategySourceSnapshot,
     UserNotification,
     personalized_predictions_enabled,
     PREDICTION_HIT_BASELINES,
@@ -25,12 +41,25 @@ from datetime import datetime, timedelta, timezone
 import csv
 import json
 import io
+import re
 import threading
 from collections import OrderedDict
 from sqlalchemy import func, case, or_, and_
 from retention_service import cleanup_expired_data
+from strategy_platform.catalog import get_strategy_labels
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/admin')
+
+
+def _audit_strategy_workspace(workspace_id, actor_id, action, resource_type, resource_id, details=None):
+    db.session.add(StrategyAuditEvent(
+        workspace_id=workspace_id,
+        actor_user_id=actor_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=str(resource_id),
+        details_json=json.dumps(details or {}, ensure_ascii=False, separators=(',', ':')),
+    ))
 
 _retrain_learning_lock = threading.RLock()
 _retrain_learning_status = {
@@ -181,6 +210,21 @@ DATA_EXPORT_MODELS = [
     ('zodiac_settings', ZodiacSetting),
     ('manual_bet_records', ManualBetRecord),
     ('lottery_draws', LotteryDraw),
+    ('macau_collected_data', MacauCollectedData),
+    ('strategy_workspaces', StrategyWorkspace),
+    ('strategy_workspace_memberships', StrategyWorkspaceMembership),
+    ('strategy_definitions', StrategyDefinition),
+    ('strategy_revisions', StrategyRevision),
+    ('strategy_subscriptions', StrategySubscription),
+    ('strategy_runs', StrategyRun),
+    ('strategy_chat_sessions', StrategyChatSession),
+    ('strategy_chat_messages', StrategyChatMessage),
+    ('strategy_proposals', StrategyProposal),
+    ('strategy_audit_events', StrategyAuditEvent),
+    ('strategy_backup_destinations', StrategyBackupDestination),
+    ('strategy_backup_outbox', StrategyBackupOutbox),
+    ('strategy_source_definitions', StrategySourceDefinition),
+    ('strategy_source_snapshots', StrategySourceSnapshot),
 ]
 
 DATA_EXPORT_LABELS = {
@@ -194,6 +238,21 @@ DATA_EXPORT_LABELS = {
     'zodiac_settings': '生肖设置',
     'manual_bet_records': '下注记录',
     'lottery_draws': '开奖数据',
+    'macau_collected_data': '澳门采集数据',
+    'strategy_workspaces': '策略工作区',
+    'strategy_workspace_memberships': '策略工作区成员',
+    'strategy_definitions': '策略定义',
+    'strategy_revisions': '策略版本',
+    'strategy_subscriptions': '策略订阅',
+    'strategy_runs': '策略运行结果',
+    'strategy_chat_sessions': '策略助手会话',
+    'strategy_chat_messages': '策略助手消息',
+    'strategy_proposals': '策略草案',
+    'strategy_audit_events': '策略审计记录',
+    'strategy_backup_destinations': '策略备份目标',
+    'strategy_backup_outbox': '策略备份队列',
+    'strategy_source_definitions': '策略数据源',
+    'strategy_source_snapshots': '策略来源快照',
 }
 
 LEARNING_PANEL_TERM_LABELS = {
@@ -212,16 +271,7 @@ LEARNING_PANEL_TERM_LABELS = {
     'zodiac': '生肖',
 }
 
-PREDICTION_STRATEGY_LABELS = {
-    'zodiac_rebound': '生肖遗漏回补',
-    'hot': '热门预测',
-    'cold': '冷门预测',
-    'trend': '走势预测',
-    'balanced': '均衡预测',
-    'hybrid': '综合预测',
-    'ml': '机器学习预测',
-    'ai': 'AI预测',
-}
+PREDICTION_STRATEGY_LABELS = get_strategy_labels()
 
 LEARNING_PANEL_TERM_LABELS['markov'] = '马尔科夫'
 LEARNING_PANEL_TERM_LABELS['transition'] = '转移概率'
@@ -230,7 +280,6 @@ LEARNING_PANEL_TERM_LABELS['phase_transition'] = '阶段转移'
 LEARNING_PANEL_TERM_LABELS['attribute_transition'] = '属性转移'
 LEARNING_PANEL_TERM_LABELS['special_transition'] = '特码转移'
 LEARNING_PANEL_TERM_LABELS['failure'] = '失误修正'
-PREDICTION_STRATEGY_LABELS['markov'] = '马尔科夫预测'
 
 
 def _actual_in_normal_expr():
@@ -525,12 +574,27 @@ def _validate_import_payload(payload):
 
 def _clear_all_data():
     delete_order = [
+        StrategyChatMessage,
+        StrategyProposal,
+        StrategyChatSession,
+        StrategyBackupOutbox,
+        StrategyRun,
+        StrategySubscription,
+        StrategyRevision,
+        StrategyDefinition,
+        StrategyAuditEvent,
+        StrategySourceSnapshot,
+        StrategySourceDefinition,
+        StrategyBackupDestination,
+        StrategyWorkspaceMembership,
+        StrategyWorkspace,
         UserNotification,
         ManualBetRecord,
         PredictionRecord,
         ActivationCodeRequest,
         ActivationCode,
         InviteCode,
+        MacauCollectedData,
         LotteryDraw,
         ZodiacSetting,
         SystemConfig,
@@ -555,7 +619,17 @@ def _import_data_payload(payload, mode):
         for row in rows:
             instance = _deserialize_model_row(model, row)
             db.session.merge(instance)
+        # Restore parent tables before children even when mapper relationship
+        # declarations are intentionally absent from the legacy ORM models.
+        db.session.flush()
 
+    # Older backups predate the strategy catalog. Rebuild code-owned built-ins so
+    # restored instances can dual-write legacy predictions into strategy_runs
+    # immediately after import.
+    from strategy_platform.service import seed_builtin_strategies
+    seed_builtin_strategies()
+    from strategy_platform.legacy import migrate_legacy_auto_prediction_subscriptions
+    migrate_legacy_auto_prediction_subscriptions()
     db.session.commit()
     ZodiacSetting._macau_year_match_cache.clear()
     return imported_counts
@@ -1341,7 +1415,22 @@ def users():
         )
         
         admin_count = User.query.filter(User.is_admin.is_(True)).count()
-        return render_template('admin/users.html', users=users, search_query=search_query, admin_count=admin_count)
+        workspaces = StrategyWorkspace.query.filter_by(status='active').all()
+        workspace_names = {workspace.id: workspace.name for workspace in workspaces}
+        page_user_ids = [item.id for item in users.items]
+        memberships = StrategyWorkspaceMembership.query.filter(
+            StrategyWorkspaceMembership.user_id.in_(page_user_ids),
+            StrategyWorkspaceMembership.status == 'active',
+        ).all() if page_user_ids else []
+        user_workspace_names = {}
+        for membership in memberships:
+            name = workspace_names.get(membership.workspace_id)
+            if name:
+                user_workspace_names.setdefault(membership.user_id, []).append(name)
+        return render_template(
+            'admin/users.html', users=users, search_query=search_query,
+            admin_count=admin_count, user_workspace_names=user_workspace_names,
+        )
     except Exception as e:
         flash(f'加载用户数据失败: {str(e)}', 'error')
         # 创建空的分页对象
@@ -1359,7 +1448,205 @@ def users():
                 self.next_num = None
         
         empty_users = EmptyPagination()
-        return render_template('admin/users.html', users=empty_users, admin_count=0)
+        return render_template(
+            'admin/users.html', users=empty_users, admin_count=0, user_workspace_names={},
+        )
+
+
+@admin_bp.route('/strategy-workspaces', methods=['GET'])
+@admin_required
+def strategy_workspaces():
+    actor = db.session.get(User, session.get('user_id'))
+    from strategy_platform.access import get_default_workspace_for_owner
+    get_default_workspace_for_owner(actor)
+    workspaces = StrategyWorkspace.query.filter_by(status='active').order_by(StrategyWorkspace.name.asc()).all()
+    own_ids = {row.workspace_id for row in StrategyWorkspaceMembership.query.filter_by(
+        user_id=actor.id, role='owner', status='active').all()}
+    return render_template('admin/strategy_workspaces.html', workspaces=workspaces, owned_workspace_ids=own_ids,
+                           github_token_configured=bool(os.environ.get('STRATEGY_GITHUB_TOKEN', '').strip()))
+
+
+@admin_bp.route('/strategy-workspaces/<int:workspace_id>', methods=['PATCH'])
+@admin_required
+def rename_admin_strategy_workspace(workspace_id):
+    from strategy_platform.access import rename_workspace
+    workspace = StrategyWorkspace.query.filter_by(id=workspace_id, status='active').first_or_404()
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'success': False, 'message': '请求体必须是 JSON 对象'}), 400
+    try:
+        changed = rename_workspace(workspace, session['user_id'], payload.get('name'), payload.get('expected_name'))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    if not changed:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': '工作区名称已更新，请刷新后重试'}), 409
+    db.session.commit()
+    return jsonify({'success': True, 'workspace': {'id': workspace.id, 'name': workspace.name, 'slug': workspace.slug}})
+
+
+@admin_bp.route('/strategy-workspaces/create', methods=['POST'])
+@admin_required
+def create_strategy_workspace():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    slug = str(data.get('slug') or '').strip().lower()
+    if not name:
+        return jsonify({'success': False, 'message': '分组名称不能为空'}), 400
+    if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', slug):
+        return jsonify({'success': False, 'message': '分组标识须为小写字母、数字、短横线或下划线'}), 400
+    if StrategyWorkspace.query.filter_by(slug=slug).first():
+        return jsonify({'success': False, 'message': '分组标识已存在'}), 409
+
+    actor = User.query.get(session.get('user_id'))
+    if actor is None:
+        return jsonify({'success': False, 'message': '管理员账号不可用'}), 401
+    workspace = StrategyWorkspace(slug=slug, name=name, status='active')
+    db.session.add(workspace)
+    db.session.flush()
+    db.session.add(StrategyWorkspaceMembership(
+        workspace_id=workspace.id, user_id=actor.id, role='owner', status='active',
+    ))
+    db.session.add(StrategyAuditEvent(
+        workspace_id=workspace.id,
+        actor_user_id=actor.id,
+        action='workspace.created',
+        resource_type='workspace',
+        resource_id=str(workspace.id),
+        reason='由站点管理员在后台创建策略分组',
+        details_json=json.dumps({'slug': slug, 'name': name}, ensure_ascii=False, separators=(',', ':')),
+    ))
+    db.session.commit()
+    return jsonify({'success': True, 'workspace': {'id': workspace.id, 'slug': slug, 'name': name}}), 201
+
+
+@admin_bp.route('/strategy-workspaces/users/<int:user_id>', methods=['GET'])
+@admin_required
+def get_user_strategy_workspaces(user_id):
+    target = User.query.get_or_404(user_id)
+    workspaces = StrategyWorkspace.query.filter_by(status='active').order_by(
+        StrategyWorkspace.name.asc(), StrategyWorkspace.id.asc()
+    ).all()
+    memberships = {
+        item.workspace_id: item
+        for item in StrategyWorkspaceMembership.query.filter_by(user_id=target.id).all()
+    }
+    return jsonify({
+        'success': True,
+        'user': {'id': target.id, 'username': target.username},
+        'workspaces': [{
+            'id': workspace.id,
+            'slug': workspace.slug,
+            'name': workspace.name,
+            'status': memberships[workspace.id].status if workspace.id in memberships else 'none',
+            'role': memberships[workspace.id].role if workspace.id in memberships else 'member',
+        } for workspace in workspaces],
+    })
+
+
+@admin_bp.route('/strategy-workspaces/users/<int:user_id>', methods=['PUT'])
+@admin_required
+def update_user_strategy_workspaces(user_id):
+    target = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True) or {}
+    requested = data.get('memberships')
+    if not isinstance(requested, list):
+        return jsonify({'success': False, 'message': '请提供分组成员列表'}), 400
+
+    desired = {}
+    for item in requested:
+        if not isinstance(item, dict):
+            return jsonify({'success': False, 'message': '分组成员数据格式不正确'}), 400
+        try:
+            workspace_id = int(item.get('workspace_id'))
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'message': '分组编号无效'}), 400
+        role = str(item.get('role') or 'member').strip()
+        if role not in {'member', 'strategy_author', 'owner'}:
+            return jsonify({'success': False, 'message': '分组角色无效'}), 400
+        if workspace_id in desired:
+            return jsonify({'success': False, 'message': '分组列表中存在重复项'}), 400
+        desired[workspace_id] = role
+
+    workspaces = {
+        item.id: item
+        for item in StrategyWorkspace.query.filter(
+            StrategyWorkspace.status == 'active',
+            StrategyWorkspace.id.in_(desired.keys()),
+        ).all()
+    } if desired else {}
+    if set(desired) != set(workspaces):
+        return jsonify({'success': False, 'message': '所选分组不存在或已停用'}), 404
+
+    actor = User.query.get(session.get('user_id'))
+    if actor is None:
+        return jsonify({'success': False, 'message': '管理员账号不可用'}), 401
+    existing = {
+        item.workspace_id: item
+        for item in StrategyWorkspaceMembership.query.join(
+            StrategyWorkspace,
+            StrategyWorkspaceMembership.workspace_id == StrategyWorkspace.id,
+        ).filter(
+            StrategyWorkspaceMembership.user_id == target.id,
+            StrategyWorkspace.status == 'active',
+        ).all()
+    }
+    for workspace_id, membership in existing.items():
+        if membership.status == 'active' and membership.role == 'owner' and (
+            workspace_id not in desired or desired[workspace_id] != 'owner'
+        ):
+            return jsonify({'success': False, 'message': '所有者须先通过所有权转移操作变更'}), 409
+    if any(role == 'owner' and (
+        workspace_id not in existing
+        or existing[workspace_id].role != 'owner'
+        or existing[workspace_id].status != 'active'
+    )
+           for workspace_id, role in desired.items()):
+        return jsonify({'success': False, 'message': '新分组所有者须通过所有权转移操作设置'}), 409
+
+    for workspace_id, workspace in workspaces.items():
+        membership = existing.get(workspace_id)
+        role = desired[workspace_id]
+        if membership is None:
+            membership = StrategyWorkspaceMembership(
+                workspace_id=workspace_id,
+                user_id=target.id,
+                role=role,
+                status='active',
+                invited_by_user_id=actor.id,
+            )
+            db.session.add(membership)
+            action = 'member.grant'
+        else:
+            previous_status = membership.status
+            previous_role = membership.role
+            action = 'member.grant' if previous_status != 'active' else 'member.role_changed'
+            membership.status = 'active'
+            if membership.role != 'owner' or previous_status != 'active':
+                membership.role = role
+            membership.invited_by_user_id = actor.id
+            if previous_status == 'active' and previous_role == membership.role:
+                action = None
+        if action:
+            _audit_strategy_workspace(workspace_id, actor.id, action, 'user', target.id, {'role': membership.role})
+        if workspace.slug == 'friends':
+            from strategy_platform.legacy import sync_legacy_user_subscriptions
+            sync_legacy_user_subscriptions(target)
+
+    for workspace_id, membership in existing.items():
+        if workspace_id in desired or membership.status != 'active':
+            continue
+        if membership.role == 'owner' and membership.status == 'active':
+            return jsonify({'success': False, 'message': '所有者须先通过所有权转移操作变更'}), 409
+        membership.status = 'removed'
+        StrategySubscription.query.filter_by(
+            workspace_id=workspace_id,
+            user_id=target.id,
+        ).update({StrategySubscription.enabled: False}, synchronize_session=False)
+        _audit_strategy_workspace(workspace_id, actor.id, 'member.removed', 'user', target.id)
+
+    db.session.commit()
+    return jsonify({'success': True})
 
 @admin_bp.route('/user/<int:user_id>/edit', methods=['GET', 'POST'])
 @admin_required
@@ -1551,6 +1838,85 @@ def delete_user(user_id):
                     'message': '至少保留一个管理员账号，不能删除最后一个管理员'
                 }), 400
 
+        owned_workspace = StrategyWorkspaceMembership.query.filter_by(
+            user_id=user.id,
+            role='owner',
+            status='active',
+        ).first()
+        if owned_workspace:
+            return jsonify({
+                'success': False,
+                'message': '该账号是策略工作区 owner，请先转移工作区所有权后再删除'
+            }), 409
+
+        user_created_strategies = StrategyDefinition.query.filter_by(owner_user_id=user.id).all()
+        for definition in user_created_strategies:
+            owner_membership = StrategyWorkspaceMembership.query.filter_by(
+                workspace_id=definition.workspace_id,
+                role='owner',
+                status='active',
+            ).first()
+            if owner_membership:
+                definition.owner_user_id = owner_membership.user_id
+            else:
+                definition.owner_user_id = None
+            definition.created_by_user_id = None
+            db.session.add(StrategyAuditEvent(workspace_id=definition.workspace_id,
+                actor_user_id=session.get('user_id'), action='strategy.owner_reassigned',
+                resource_type='strategy', resource_id=definition.public_id,
+                reason='账号删除后保留策略与历史记录'))
+
+        StrategyDefinition.query.filter_by(created_by_user_id=user.id).update(
+            {StrategyDefinition.created_by_user_id: None}, synchronize_session=False)
+
+        for revision in StrategyRevision.query.filter_by(created_by_user_id=user.id).all():
+            revision.created_by_user_id = None
+        for source in StrategySourceDefinition.query.filter_by(created_by_user_id=user.id).all():
+            owner_membership = StrategyWorkspaceMembership.query.filter_by(
+                workspace_id=source.workspace_id,
+                role='owner',
+                status='active',
+            ).first()
+            if owner_membership:
+                source.created_by_user_id = owner_membership.user_id
+            else:
+                source.created_by_user_id = None
+        for destination in StrategyBackupDestination.query.filter_by(created_by_user_id=user.id).all():
+            owner_membership = StrategyWorkspaceMembership.query.filter_by(
+                workspace_id=destination.workspace_id,
+                role='owner',
+                status='active',
+            ).first()
+            if owner_membership:
+                destination.created_by_user_id = owner_membership.user_id
+            else:
+                destination.created_by_user_id = None
+
+        StrategyProposal.query.filter_by(created_by_user_id=user.id).delete(synchronize_session=False)
+        StrategyChatMessage.query.filter(
+            StrategyChatMessage.session_id.in_(
+                db.session.query(StrategyChatSession.id).filter_by(user_id=user.id)
+            )
+        ).delete(synchronize_session=False)
+        StrategyChatSession.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        removed_subscriptions = db.session.query(StrategySubscription.id).filter_by(user_id=user.id)
+        StrategyRun.query.filter(StrategyRun.subscription_id.in_(removed_subscriptions)).update(
+            {StrategyRun.subscription_id: None}, synchronize_session=False)
+        StrategySubscription.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        StrategyRun.query.filter_by(subject_user_id=user.id).update(
+            {StrategyRun.subject_user_id: None}, synchronize_session=False
+        )
+        StrategyRun.query.filter_by(triggered_by_user_id=user.id).update(
+            {StrategyRun.triggered_by_user_id: None}, synchronize_session=False
+        )
+        StrategyAuditEvent.query.filter_by(actor_user_id=user.id).update(
+            {StrategyAuditEvent.actor_user_id: None}, synchronize_session=False
+        )
+        StrategyWorkspaceMembership.query.filter_by(invited_by_user_id=user.id).update(
+            {StrategyWorkspaceMembership.invited_by_user_id: None}, synchronize_session=False
+        )
+        StrategyWorkspaceMembership.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+
         user_config_keys = [
             f'reset_token_{user.id}',
             f'email_verified_{user.id}',
@@ -1614,6 +1980,7 @@ SYSTEM_CONFIG_DEFAULTS = {
     'user_notification_retention_days': '30',
     'backtest_runs_retention_days': '90',
     'macau_collected_data_retention_days': '365',
+    'strategy_chat_retention_days': '90',
     'system_name': 'AI数据分析预测系统',
     'system_description': '',
     'allow_registration': 'true',
@@ -1665,6 +2032,7 @@ def system_config():
                 'user_notification_retention_days',
                 'backtest_runs_retention_days',
                 'macau_collected_data_retention_days',
+                'strategy_chat_retention_days',
             )
             try:
                 for key in retention_keys:
@@ -2219,6 +2587,7 @@ def predictions():
             region_filter=region_filter,
             strategy_filter=strategy_filter,
             period_filter=period_filter,
+            strategy_catalog=get_strategy_labels(),
         )
     except Exception as e:
         flash(f'加载预测记录失败: {str(e)}', 'error')
@@ -2245,6 +2614,7 @@ def predictions():
             region_filter='',
             strategy_filter='',
             period_filter='',
+            strategy_catalog=get_strategy_labels(),
         )
 
 @admin_bp.route('/bets')

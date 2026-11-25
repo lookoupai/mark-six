@@ -778,6 +778,8 @@
             <a href="{{ url_for('user.data_statistics') }}" class="{% if request.endpoint == 'user.data_statistics' %}active{% endif %}"><i>📊</i> 数据统计</a>
             <a href="{{ url_for('user.analytics') }}" class="{% if request.endpoint == 'user.analytics' %}active{% endif %}"><i>📈</i> 统计分析</a>
             <a href="{{ url_for('user.invite_codes') }}"><i>🎫</i> 邀请好友</a>
+            <a href="{{ url_for('user.strategy_workspace') }}" class="{% if request.endpoint == 'user.strategy_workspace' %}active{% endif %}"><i>🧩</i> 策略工作区</a>
+            <a href="{{ url_for('user.strategy_assistant') }}" class="{% if request.endpoint == 'user.strategy_assistant' %}active{% endif %}"><i>💬</i> AI 策略助手</a>
             <a href="{{ url_for('index') }}"><i>🏠</i> 返回首页</a>
             <a href="{{ url_for('auth.logout') }}"><i>🚪</i> 退出登录</a>
         </nav>

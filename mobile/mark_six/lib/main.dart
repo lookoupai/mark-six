@@ -1,4 +1,4 @@
-﻿
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -13,6 +13,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'api_client.dart';
 import 'config.dart';
 import 'models.dart';
+import 'strategy_directory.dart';
 
 const String _lastRegionPrefKey = 'last_selected_region';
 
@@ -4193,6 +4194,12 @@ class _PredictScreenState extends State<PredictScreen> {
   Map<String, dynamic>? _macauFiveZodiac;
   List<String> _normalZodiacs = [];
   String _specialZodiac = '';
+  int? _strategyWorkspaceId;
+  String _strategyWorkspaceRole = '';
+  final Set<String> _customStrategyKeys = {};
+  StrategyDirectory? _directory;
+  List<Map<String, dynamic>> _strategyWorkspaces = [];
+  int _catalogRequest = 0;
   bool _loadingRecords = false;
   List<PredictionItem> _predictionRecords = [];
   List<Map<String, dynamic>> _regionSummaries = [];
@@ -4204,7 +4211,7 @@ class _PredictScreenState extends State<PredictScreen> {
   bool get _showNormalNumbers =>
       widget.appState.user?.showNormalNumbers ?? false;
 
-  final Map<String, String> _strategyLabels = const {
+  Map<String, String> _strategyLabels = {
     'zodiac_rebound': '生肖遗漏回补',
     'ml': '机器学习',
     'markov': '马尔科夫',
@@ -4382,6 +4389,7 @@ class _PredictScreenState extends State<PredictScreen> {
             _region = value;
             _resetPrediction();
           });
+          _loadStrategyCatalog();
           _loadPredictionRecords();
         },
         child: Container(
@@ -4423,7 +4431,104 @@ class _PredictScreenState extends State<PredictScreen> {
     final savedRegion = await _loadLastRegion();
     if (!mounted) return;
     setState(() => _region = savedRegion);
+    _loadStrategyCatalog();
     _loadPredictionRecords();
+  }
+
+  Future<void> _loadStrategyCatalog({int? workspaceId}) async {
+    final requestId = ++_catalogRequest;
+    try {
+      final response = await ApiClient.instance.strategyCatalog();
+      final rawItems = response['items'];
+      if (response['success'] != true || rawItems is! List) {
+        throw Exception(response['message'] ?? '策略目录暂不可用');
+      }
+      final items = rawItems.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList()
+        ..sort((a, b) => (a['display_order'] as num? ?? 100).compareTo(b['display_order'] as num? ?? 100));
+      final workspaces = await ApiClient.instance.strategyWorkspaces();
+      final spaces = (workspaces['items'] as List? ?? []).whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item)).toList();
+      final selected = selectStrategyWorkspace(spaces, workspaceId ?? _strategyWorkspaceId);
+      final selectedId = (selected?['id'] as num?)?.toInt();
+      List<Map<String, dynamic>> customItems = [];
+      if (selectedId != null) {
+        final custom = await ApiClient.instance.workspaceStrategies(selectedId);
+        if (custom['success'] == true) {
+          customItems = (custom['items'] as List? ?? []).whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item)).toList();
+        }
+      }
+      if (!mounted || requestId != _catalogRequest) return;
+      final directory = StrategyDirectory(items, customItems, _region);
+      setState(() {
+        _directory = directory;
+        _strategyWorkspaces = spaces;
+        _strategyWorkspaceId = selectedId;
+        _strategyWorkspaceRole = selected?['role']?.toString() ?? '';
+        _customStrategyKeys..clear()..addAll(directory.custom.keys);
+        _strategyLabels = directory.labels;
+        final next = _strategy == _macauFiveZodiacKey && _region == 'macau'
+            ? _strategy : directory.resolveSelection(_strategy);
+        if (next != _strategy) _resetPrediction();
+        _strategy = next;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _catalogRequest) return;
+      setState(() {
+        for (final key in _customStrategyKeys) { _strategyLabels.remove(key); }
+        _customStrategyKeys.clear();
+        _directory = null;
+        if (!_strategyLabels.containsKey(_strategy)) {
+          _strategy = _strategyLabels.keys.firstOrNull ?? '';
+          _resetPrediction();
+        }
+      });
+    }
+  }
+
+  Future<void> _manageStrategySubscription(bool? scheduled) async {
+    final workspaceId = _strategyWorkspaceId;
+    if (workspaceId == null || !_customStrategyKeys.contains(_strategy)) return;
+    final key = _strategy;
+    try {
+      final response = scheduled == null
+          ? await ApiClient.instance.unsubscribeStrategy(workspaceId, key)
+          : await ApiClient.instance.subscribeStrategy(workspaceId: workspaceId,
+              strategyId: key, region: _region, scheduled: scheduled);
+      if (!mounted) return;
+      if (response['success'] != true) throw Exception(response['message'] ?? '订阅更新失败');
+      _showMessage(scheduled == null ? '已取消订阅' : scheduled ? '已订阅当前地区自动运行' : '已加入手动订阅');
+      await _loadStrategyCatalog();
+    } catch (error) {
+      if (mounted) _showMessage(error.toString());
+    }
+  }
+
+  Future<void> _showStrategyHistory() async {
+    final workspaceId = _strategyWorkspaceId;
+    if (workspaceId == null) return;
+    try {
+      final response = await ApiClient.instance.strategyRuns(workspaceId, _strategy);
+      if (!mounted) return;
+      if (response['success'] != true) throw Exception(response['message'] ?? '历史读取失败');
+      final runs = (response['items'] as List? ?? []).whereType<Map>().toList();
+      await showModalBottomSheet<void>(context: context, isScrollControlled: true,
+        builder: (context) => SafeArea(child: SizedBox(height: MediaQuery.sizeOf(context).height * .65,
+          child: runs.isEmpty ? const Center(child: Text('还没有运行记录')) : ListView(
+            padding: const EdgeInsets.all(16), children: [
+              const Text('策略运行记录', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              for (final run in runs) ListTile(
+                title: Text('${run['region'] == 'hk' ? '香港' : '澳门'} · 第 ${run['period']} 期'),
+                subtitle: Text(run['status'] == 'failed' ? '运行失败，可重试' : strategyResultText(run['result'] as Map? ?? {})),
+                isThreeLine: true,
+              ),
+            ],
+          ),
+        )),
+      );
+    } catch (error) {
+      if (mounted) _showMessage(error.toString());
+    }
   }
 
   @override
@@ -4489,6 +4594,24 @@ class _PredictScreenState extends State<PredictScreen> {
     final createdAt = createdAtRaw != null && createdAtRaw.isNotEmpty
         ? DateTime.tryParse(createdAtRaw)
         : DateTime.now();
+    final strategyResult = result['result'];
+    final strategyGroups = <String, dynamic>{};
+    if (strategyResult is Map && strategyResult['kind'] == 'zodiac_groups') {
+      final groups = strategyResult['groups'];
+      if (groups is List) {
+        for (final group in groups.whereType<Map>()) {
+          final id = group['id']?.toString();
+          if (id == 'six' || id == 'four') {
+            strategyGroups['${id}_zodiacs'] = group['items'] as List? ?? [];
+          }
+        }
+      }
+    }
+    if (strategyGroups.isEmpty) {
+      strategyGroups.addAll(Map<String, dynamic>.from(
+        (result['model_meta'] as Map?)?['zodiac_rebound'] as Map? ?? {},
+      ));
+    }
 
     final item = PredictionItem(
       id: (result['prediction_id'] as num?)?.toInt() ??
@@ -4504,9 +4627,7 @@ class _PredictScreenState extends State<PredictScreen> {
       actualSpecialZodiac: '',
       result: 'pending',
       createdAt: createdAt,
-      zodiacGroups: Map<String, dynamic>.from(
-        (result['model_meta'] as Map?)?['zodiac_rebound'] as Map? ?? {},
-      ),
+      zodiacGroups: strategyGroups,
     );
 
     setState(() {
@@ -4633,6 +4754,41 @@ class _PredictScreenState extends State<PredictScreen> {
       return;
     }
 
+    if (_customStrategyKeys.contains(_strategy)) {
+      final workspaceId = _strategyWorkspaceId;
+      if (workspaceId == null) {
+        setState(() => _loading = false);
+        _showMessage('尚未加入可用的策略工作区');
+        return;
+      }
+      try {
+        final response = await ApiClient.instance.runWorkspaceStrategy(
+          workspaceId: workspaceId,
+          strategyId: _strategy,
+          region: _region,
+        );
+        if (response['success'] != true) {
+          _showMessage(response['message']?.toString() ?? '策略运行失败');
+          return;
+        }
+        if (!mounted) return;
+        setState(() {
+          _result = {
+            'strategy': _strategy,
+            'period': (response['result'] as Map?)?['period']?.toString() ?? '',
+            'result': response['result'],
+            if ((response['result'] as Map?)?['kind'] == 'number_selection')
+              ...Map<String, dynamic>.from((response['result'] as Map)['selection'] as Map? ?? {}),
+          };
+        });
+      } catch (e) {
+        if (mounted) _showMessage('策略运行失败: $e');
+      } finally {
+        if (mounted) setState(() => _loading = false);
+      }
+      return;
+    }
+
     await _runPredictOnce(_strategy);
     if (mounted) {
       setState(() => _loading = false);
@@ -4705,11 +4861,56 @@ class _PredictScreenState extends State<PredictScreen> {
   }
 
   Widget _buildPredictionNumbers() {
+    final structuredResult = _result?['result'];
+    final structuredKind = structuredResult is Map ? structuredResult['kind'] : null;
+    final structuredGroups = structuredResult is Map &&
+            (structuredKind == 'zodiac_groups' || structuredKind == 'external_selection')
+        ? structuredResult['groups'] as List?
+        : null;
     final meta = _result?['model_meta'];
     final zodiacAnalysis = meta is Map ? meta['zodiac_rebound'] : null;
-    if (zodiacAnalysis is Map) {
-      final six = (zodiacAnalysis['six_zodiacs'] as List? ?? []).join(' · ');
-      final four = (zodiacAnalysis['four_zodiacs'] as List? ?? []).join(' · ');
+    if (structuredGroups != null || zodiacAnalysis is Map) {
+      Map? findGroup(String id) {
+        for (final group in structuredGroups ?? const []) {
+          if (group is Map && group['id'] == id) return group;
+        }
+        return null;
+      }
+
+      if (structuredKind == 'external_selection') {
+        return Column(
+          children: [
+            for (final group in (structuredGroups ?? const []).whereType<Map>()) ...[
+              Text(group['label']?.toString() ?? '外部来源'),
+              const SizedBox(height: 8),
+              Text((group['items'] as List? ?? []).join(' · '),
+                  style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 14),
+            ],
+          ],
+        );
+      }
+      if (structuredKind == 'zodiac_groups' && structuredGroups != null && zodiacAnalysis is! Map) {
+        return Column(
+          children: [
+            for (final group in structuredGroups.whereType<Map>()) ...[
+              Text(group['label']?.toString() ?? group['id']?.toString() ?? '生肖组合'),
+              const SizedBox(height: 8),
+              Text((group['items'] as List? ?? []).join(' · '),
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 14),
+            ],
+          ],
+        );
+      }
+      final sixGroup = findGroup('six');
+      final fourGroup = findGroup('four');
+      final sixValues = sixGroup?['items'] as List? ??
+          (zodiacAnalysis is Map ? zodiacAnalysis['six_zodiacs'] as List? : null) ?? [];
+      final fourValues = fourGroup?['items'] as List? ??
+          (zodiacAnalysis is Map ? zodiacAnalysis['four_zodiacs'] as List? : null) ?? [];
+      final six = sixValues.join(' · ');
+      final four = fourValues.join(' · ');
       return Column(
         children: [
           const Text('综合六肖'),
@@ -4719,6 +4920,25 @@ class _PredictScreenState extends State<PredictScreen> {
           const Text('精选四肖'),
           const SizedBox(height: 8),
           Text(four, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        ],
+      );
+    }
+    if (structuredKind == 'number_selection' && structuredResult is Map) {
+      final selection = structuredResult['selection'] as Map? ?? {};
+      final numbers = (selection['normal'] as List? ?? []).map((value) => value.toString()).toList();
+      final special = selection['special'] as Map? ?? {};
+      final specialNumber = special['number']?.toString() ?? '';
+      return Column(
+        children: [
+          if (_showNormalNumbers) ...[
+            const Text('候选号码'),
+            const SizedBox(height: 8),
+            Text(numbers.join(' · '), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 14),
+          ],
+          const Text('主选号码'),
+          const SizedBox(height: 8),
+          Text(specialNumber, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
         ],
       );
     }
@@ -6537,7 +6757,33 @@ class _PredictScreenState extends State<PredictScreen> {
     final activationValid = widget.appState.activationValid;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('号码预测')),
+      appBar: AppBar(
+        title: const Text('号码预测'),
+        actions: [
+          if (_strategyWorkspaceId != null &&
+              {'owner', 'strategy_author'}.contains(_strategyWorkspaceRole) &&
+              (!_customStrategyKeys.contains(_strategy) || (_directory?.canEdit(_strategy) ?? false)))
+            IconButton(
+              tooltip: 'AI 策略助手',
+              icon: const Icon(Icons.auto_awesome),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => StrategyAssistantScreen(
+                    workspaceId: _strategyWorkspaceId!,
+                    region: _region,
+                    strategyId: _customStrategyKeys.contains(_strategy)
+                        ? _strategy
+                        : null,
+                    builtinStrategyKey: !_customStrategyKeys.contains(_strategy) &&
+                            (_directory?.canCloneBuiltin(_strategy) ?? false)
+                        ? _strategy
+                        : null,
+                  ),
+                ),
+              ).then((_) => _loadStrategyCatalog()),
+            ),
+        ],
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -6550,6 +6796,22 @@ class _PredictScreenState extends State<PredictScreen> {
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
+                    if (_strategyWorkspaces.isNotEmpty)
+                      DropdownButtonFormField<int>(
+                        key: ValueKey(_strategyWorkspaceId),
+                        initialValue: _strategyWorkspaceId,
+                        isExpanded: true,
+                        decoration: const InputDecoration(labelText: '策略工作区'),
+                        items: _strategyWorkspaces.map((space) => DropdownMenuItem<int>(
+                          value: (space['id'] as num).toInt(), child: Text(space['name']?.toString() ?? '工作区'),
+                        )).toList(),
+                        onChanged: _loading ? null : (value) {
+                          if (value == null) return;
+                          setState(() { _resetPrediction(); });
+                          _loadStrategyCatalog(workspaceId: value);
+                        },
+                      ),
+                    const SizedBox(height: 8),
                     Row(
                       children: [
                         _buildPredictionRegionButton('macau', '澳门'),
@@ -6599,6 +6861,14 @@ class _PredictScreenState extends State<PredictScreen> {
                         );
                       },
                     ),
+                    if (_customStrategyKeys.contains(_strategy))
+                      Wrap(spacing: 8, children: [
+                        TextButton(onPressed: _loading ? null : () => _manageStrategySubscription(false), child: const Text('手动订阅')),
+                        TextButton(onPressed: _loading ? null : () => _manageStrategySubscription(true), child: const Text('自动订阅当前地区')),
+                        if ((_directory?.custom[_strategy]?['subscription'] as Map?)?['enabled'] == true)
+                          TextButton(onPressed: () => _manageStrategySubscription(null), child: const Text('取消订阅')),
+                        TextButton(onPressed: _showStrategyHistory, child: const Text('运行记录')),
+                      ]),
                     const SizedBox(height: 10),
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 180),
@@ -6681,6 +6951,272 @@ class _PredictScreenState extends State<PredictScreen> {
       List<String> normal, String special) {
     if (special.isEmpty) return normal;
     return normal.where((value) => value != special).toList();
+  }
+}
+
+class StrategyAssistantScreen extends StatefulWidget {
+  const StrategyAssistantScreen({
+    super.key,
+    required this.workspaceId,
+    required this.region,
+    this.strategyId,
+    this.builtinStrategyKey,
+    this.client,
+  });
+
+  final int workspaceId;
+  final String region;
+  final String? strategyId;
+  final String? builtinStrategyKey;
+  final ApiClient? client;
+
+  @override
+  State<StrategyAssistantScreen> createState() => _StrategyAssistantScreenState();
+}
+
+class _StrategyAssistantScreenState extends State<StrategyAssistantScreen> {
+  final TextEditingController _messageController = TextEditingController();
+  final List<Map<String, String>> _messages = [];
+  bool _loading = true;
+  bool _sending = false;
+  int? _sessionId;
+  int? _proposalId;
+  int? _expectedRevisionId;
+  Map<String, dynamic>? _backtest;
+  Map? _proposalSpec;
+  String _status = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _openSession();
+  }
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _openSession() async {
+    try {
+      String? strategyId = widget.strategyId;
+      if (strategyId == null && widget.builtinStrategyKey != null) {
+        final cloned = await (widget.client ?? ApiClient.instance).cloneBuiltinStrategy(
+          workspaceId: widget.workspaceId,
+          strategyKey: widget.builtinStrategyKey!,
+        );
+        strategyId = (cloned['item'] as Map?)?['id']?.toString();
+        if (strategyId == null || strategyId.isEmpty) {
+          throw Exception(cloned['message']?.toString() ?? '复制内置策略失败');
+        }
+      }
+      final response = await (widget.client ?? ApiClient.instance).createStrategyChatSession(
+        workspaceId: widget.workspaceId,
+        strategyId: strategyId,
+      );
+      if (response['success'] != true) {
+        throw Exception(response['message']?.toString() ?? '创建策略助手会话失败');
+      }
+      if (!mounted) return;
+      setState(() {
+        _sessionId = (response['session_id'] as num?)?.toInt();
+        _loading = false;
+        _status = strategyId == null ? '描述新策略想法，助手会生成可校验的规则草案。' : '已载入策略，可以描述要修改的规则。';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _status = error.toString();
+      });
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final text = _messageController.text.trim();
+    final sessionId = _sessionId;
+    if (text.isEmpty || sessionId == null || _sending) return;
+    setState(() {
+      _sending = true;
+      _proposalId = null;
+      _backtest = null;
+      _proposalSpec = null;
+      _messages.add({'role': 'user', 'content': text});
+      _messageController.clear();
+    });
+    try {
+      final response = await (widget.client ?? ApiClient.instance).sendStrategyChatMessage(
+        workspaceId: widget.workspaceId,
+        sessionId: sessionId,
+        message: text,
+      );
+      if (response['success'] != true) {
+        throw Exception(response['message']?.toString() ?? '策略助手请求失败');
+      }
+      if (!mounted) return;
+      setState(() {
+        _messages.add({'role': 'assistant', 'content': response['reply']?.toString() ?? ''});
+        _proposalId = (response['proposal_id'] as num?)?.toInt();
+        _proposalSpec = (response['proposal'] as Map?)?['spec'] as Map?;
+        _expectedRevisionId = (response['expected_revision_id'] as num?)?.toInt();
+        _status = _proposalId == null ? '可以继续补充规则。' : '规则草案已校验，先回测再决定发布。';
+      });
+    } catch (error) {
+      if (mounted) setState(() => _status = error.toString());
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _runBacktest() async {
+    final proposalId = _proposalId;
+    if (proposalId == null) return;
+    setState(() => _sending = true);
+    try {
+      final response = await (widget.client ?? ApiClient.instance).backtestStrategyProposal(
+        workspaceId: widget.workspaceId,
+        proposalId: proposalId,
+        region: widget.region,
+      );
+      if (response['success'] != true) {
+        throw Exception(response['message']?.toString() ?? '草案回测失败');
+      }
+      if (!mounted) return;
+      setState(() {
+        _backtest = Map<String, dynamic>.from(response['backtest'] as Map? ?? {});
+        _status = '回测完成。结果只描述历史样本。';
+      });
+    } catch (error) {
+      if (mounted) setState(() => _status = error.toString());
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _publish() async {
+    final proposalId = _proposalId;
+    if (proposalId == null || _backtest == null) return;
+    setState(() => _sending = true);
+    try {
+      final response = await (widget.client ?? ApiClient.instance).publishStrategyProposal(
+        workspaceId: widget.workspaceId,
+        proposalId: proposalId,
+        expectedRevisionId: _expectedRevisionId,
+      );
+      if (response['success'] != true) {
+        throw Exception(response['message']?.toString() ?? '发布策略失败');
+      }
+      if (!mounted) return;
+      setState(() {
+        _proposalId = null;
+        _backtest = null;
+        _status = '策略“${(response['item'] as Map?)?['name'] ?? ''}”已发布。';
+      });
+    } catch (error) {
+      if (mounted) setState(() => _status = error.toString());
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('AI 策略助手')),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(_status, style: const TextStyle(color: Color(0xFF64748B))),
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final item = _messages[index];
+                        final isUser = item['role'] == 'user';
+                        return Align(
+                          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            constraints: const BoxConstraints(maxWidth: 560),
+                            margin: const EdgeInsets.only(bottom: 9),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: isUser ? const Color(0xFFDBEAFE) : const Color(0xFFF1F5F9),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Text(item['content'] ?? ''),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            if (_proposalId != null && _proposalSpec != null)
+              Padding(padding: const EdgeInsets.all(12), child: Text(strategySpecText(_proposalSpec!))),
+            if (_backtest != null)
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('回测样本：${_backtest!['sample_count'] ?? 0}'),
+                        Text(strategyBacktestText(_backtest)),
+                        const SizedBox(height: 8),
+                        FilledButton(onPressed: _sending ? null : _publish, child: const Text('确认发布')),
+                      ],
+                    ),
+                  ),
+                ),
+              )
+            else if (_proposalId != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.tonal(
+                    onPressed: _sending ? null : _runBacktest,
+                    child: const Text('回测草案'),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _messageController,
+                      maxLength: 3000,
+                      minLines: 1,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        hintText: '描述新策略或修改想法',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filled(
+                    onPressed: _sending || _sessionId == null ? null : _sendMessage,
+                    icon: _sending
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.send),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

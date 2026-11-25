@@ -1,0 +1,71 @@
+{% extends "admin/base.html" %}
+{% block page_title %}策略工作区{% endblock %}
+{% block content %}
+<section class="card workspace-management">
+    <div class="card-header">
+        <h2 class="card-title">策略工作区</h2>
+        <a class="btn" href="{{ url_for('admin.users') }}">管理成员分组</a>
+    </div>
+    <p>分组名称用于界面展示；修改名称不会改变成员权限、策略或运行记录。</p>
+    <section class="workspace-backup-note" aria-labelledby="workspaceBackupHeading">
+        <h3 id="workspaceBackupHeading">GitHub 备份</h3>
+        <p>同一工作区的所有已发布策略共用备份设置，由工作区所有者管理。普通成员无需单独配置。</p>
+        <p>连接凭据由站点部署统一提供。{{ '服务器已配置凭据。' if github_token_configured else '服务器尚未配置凭据，请由部署管理员完成配置。' }} 本地保存和策略运行不依赖 GitHub。</p>
+        <p>站点管理员可以维护分组名称和成员；配置备份还需要拥有该工作区的所有者权限。</p>
+    </section>
+    <div id="workspaceManagementStatus" role="status" aria-live="polite"></div>
+    <div class="workspace-management-list">
+        {% for workspace in workspaces %}
+        <article id="workspace-{{ workspace.id }}" class="workspace-management-row" data-workspace-id="{{ workspace.id }}">
+            <form class="workspace-rename-form" data-name="{{ workspace.name }}">
+                <label for="workspaceName{{ workspace.id }}">工作区名称</label>
+                <input id="workspaceName{{ workspace.id }}" name="name" value="{{ workspace.name }}" maxlength="120" required autocomplete="off">
+                <button type="submit" class="btn btn-primary">保存名称</button>
+            </form>
+            <div class="workspace-management-links">
+                {% if workspace.id in owned_workspace_ids %}
+                <a class="btn" href="{{ url_for('user.strategy_workspace', workspace_id=workspace.id) }}">打开工作区</a>
+                <a class="btn btn-primary" href="{{ url_for('user.strategy_workspace', workspace_id=workspace.id) }}#strategyBackupSection">配置 GitHub 备份</a>
+                {% else %}
+                <span>请联系该工作区所有者配置备份。</span>
+                {% endif %}
+            </div>
+        </article>
+        {% else %}<p>暂无工作区，请在用户管理中创建策略分组。</p>{% endfor %}
+    </div>
+</section>
+<style>
+.workspace-management { color: #e2e8f0; }
+.workspace-backup-note { margin: 1rem 0 1.5rem; padding: 1rem; background: #17253b; border-radius: 10px; }
+.workspace-backup-note p { margin: .45rem 0; line-height: 1.65; }
+.workspace-management-list { display: grid; gap: 1rem; }
+.workspace-management-row { padding: 1rem 0; border-top: 1px solid #475569; }
+.workspace-rename-form { display: grid; gap: .7rem; grid-template-columns: auto minmax(120px, 1fr) auto; align-items: center; }
+.workspace-rename-form input { min-width: 0; padding: .65rem; background: #0f172a; color: #f8fafc; border: 1px solid #64748b; border-radius: 7px; }
+.workspace-management-links { display: flex; gap: .7rem; align-items: center; flex-wrap: wrap; margin-top: .8rem; }
+#workspaceManagementStatus { min-height: 1.5rem; color: #bae6fd; }
+@media (max-width: 600px) { .workspace-rename-form { grid-template-columns: 1fr; } }
+</style>
+<script>
+for (const form of document.querySelectorAll('.workspace-rename-form')) {
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        const status = document.getElementById('workspaceManagementStatus');
+        button.disabled = true;
+        try {
+            const response = await fetch(`/admin/strategy-workspaces/${form.closest('[data-workspace-id]').dataset.workspaceId}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: form.elements.name.value, expected_name: form.dataset.name}),
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.message || '保存名称失败');
+            form.dataset.name = payload.workspace.name;
+            form.elements.name.value = payload.workspace.name;
+            status.textContent = `已保存“${payload.workspace.name}”。`;
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
+}
+</script>
+{% endblock %}

@@ -93,30 +93,11 @@
     <button id="updateDataBtn" class="modern-btn btn-success" style="padding: 10px 20px;">
         <i class="fas fa-sync-alt"></i> 更新开奖数据
     </button>
-    <button class="modern-btn btn-info" onclick="getPrediction('ml')" id="mlPredBtn">
-        <i class="fas fa-flask"></i> 机器学习预测
+    {% for strategy in prediction_strategy_catalog|sort(attribute='display_order') %}
+    <button class="modern-btn {{ strategy.button_class }}" onclick="getPrediction('{{ strategy.key }}')" id="{{ 'zodiacReboundPredBtn' if strategy.key == 'zodiac_rebound' else strategy.key ~ 'PredBtn' }}">
+        <i class="fas fa-{{ strategy.icon }}"></i> {{ strategy.label }}
     </button>
-    <button class="modern-btn btn-primary" onclick="getPrediction('markov')" id="markovPredBtn">
-        <i class="fas fa-project-diagram"></i> 马尔科夫预测
-    </button>
-    <button class="modern-btn btn-success" onclick="getPrediction('balanced')" id="balancedPredBtn">
-        <i class="fas fa-balance-scale"></i> 均衡预测
-    </button>
-    <button class="modern-btn btn-danger" onclick="getPrediction('hot')" id="hotPredBtn">
-        <i class="fas fa-fire"></i> 热门预测
-    </button>
-    <button class="modern-btn btn-secondary" onclick="getPrediction('cold')" id="coldPredBtn">
-        <i class="fas fa-snowflake"></i> 冷门预测
-    </button>
-    <button class="modern-btn btn-primary" onclick="getPrediction('trend')" id="trendPredBtn">
-        <i class="fas fa-chart-line"></i> 走势预测
-    </button>
-    <button class="modern-btn btn-success" onclick="getPrediction('hybrid')" id="hybridPredBtn">
-        <i class="fas fa-sliders-h"></i> 综合预测
-    </button>
-    <button class="modern-btn btn-primary" onclick="getPrediction('zodiac_rebound')" id="zodiacReboundPredBtn">
-        <i class="fas fa-paw"></i> 生肖遗漏回补
-    </button>
+    {% endfor %}
     <button class="modern-btn btn-warning" onclick="getMacauFiveZodiac()" id="macauFiveZodiacBtn">
         <i class="fas fa-dice-five"></i> 五码五肖
     </button>
