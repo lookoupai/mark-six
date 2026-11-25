@@ -365,7 +365,7 @@ AI 策略助手使用独立聊天页（用户中心侧栏 **AI 策略助手**，
 
 工作区支持切换、分享与撤回、手动/自动订阅和取消、运行记录及归档。owner 可直接上传导出的策略 JSON 包，预览后导入为私有草稿，再确认发布，无需 GitHub。网页和 Flutter 共用授权与 CSRF 校验；重启迁移只镜像已授权成员，不自动把其他账号加入工作区。
 
-迁移、隔离测试、Docker 持久化及上线验证步骤见 [策略平台 V2 验证说明](docs/architecture/strategy-platform-v2-validation.md)。移动端固定 Flutter 3.38.10；普通分支和 PR 仅做测试/构建，APK 仅由 tag 或手动发布工作流发布。
+迁移、隔离测试、Docker 持久化及上线验证步骤见 [策略平台 V2 验证说明](docs/architecture/strategy-platform-v2-validation.md)。目前暂停 APK 开发，保留 `mobile/mark_six` 源码；普通分支、PR 和 Docker 验证只运行后端与网页检查，不安装 Flutter/Android 工具链、不构建 APK。Android 发布工作流仅保留手动入口，不随 tag 自动运行；以后明确需要 APK 时再启用，固定 Flutter 3.38.10。
 
 ## 安全与代理配置
 

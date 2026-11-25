@@ -18,7 +18,9 @@ npm run test:e2e
 
 浏览器测试启动独立临时应用，运行真实页面与 API；仅外部 AI 和开奖获取使用固定数据，所有非本机网络被阻止。覆盖创建、执行、订阅与取消、分享、编辑、历史、导出、预览导入、草稿发布、工作区切换、AI 确认、归档和移动宽度布局。`PLAYWRIGHT_CHROMIUM_EXECUTABLE` 可指定本机已安装 Chromium；`PYTHON` 可覆盖默认 `.venv/bin/python`。
 
-移动端固定 Flutter **3.38.10**（Dart 3.10.9）、JDK 17、Android SDK 36，沿用 AGP 8.11.1 / Gradle 8.14。不要自动追最新 stable 导致工具链不兼容。
+目前暂停 APK 开发，常规验证仅包含上述后端和网页检查，不安装移动端工具链。`mobile/mark_six` 保留源码；本机 APK、构建缓存及本次验证下载的临时 SDK/JDK 已清理。
+
+仅在明确恢复移动端开发时使用以下命令。移动端固定 Flutter **3.38.10**（Dart 3.10.9）、JDK 17、Android SDK 36，沿用 AGP 8.11.1 / Gradle 8.14。不要自动追最新 stable 导致工具链不兼容。
 
 ```bash
 cd mobile/mark_six
@@ -28,7 +30,7 @@ flutter test
 flutter build apk --debug
 ```
 
-既有 Flutter 警告与提示仍显示在 analyze 输出，CI 只将错误作为阻断。本轮未全面清理非策略页面的旧 lint。普通分支、PR 只验证和本地构建 debug APK，不上传 APK、不创建 Release；只有 `v*` tag 或显式运行 Android Release 工作流才签名发布。Docker 发布也依赖验证成功。
+既有 Flutter 警告与提示仍显示在 analyze 输出，手动 Android 工作流只将错误作为阻断。本轮未全面清理非策略页面的旧 lint。普通分支、PR、tag 均不自动构建 APK；只有显式运行 Android Release 工作流才进行 Flutter 分析、测试和签名发布。Docker 发布依赖后端与网页验证成功。
 
 ## MariaDB 升级与恢复演练
 

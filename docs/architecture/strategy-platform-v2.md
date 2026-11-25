@@ -413,7 +413,7 @@ strategy_platform/
 - **Result/evaluator tests**：同一个保存结果进入网页、移动 API、站内/Telegram/邮件、结算与 backtest 时展示/判定一致；仍识别旧格式。
 - **Backup tests**：DB commit 成功但 GitHub down 时只把 outbox 置 pending，不回滚策略；同一事件重试不重复 commit；restore 先导入草案；secret scanner 确认无密钥和对话正文。
 - **Migration/restore tests**：从当前版本 SQLite fixture 升级；导出 workspace 策略、清空隔离测试数据库、重新导入，核对 definition/revision/access 关系；测试文件使用临时数据库，不能读取 `data/lottery_system.db`。
-- **Regression suite**：保留当前生肖历史补齐/防未来数据、通知、AI button、激活码修复和安全测试；Flutter release/lint 纳入 CI，但只能在 tag 或显式 workflow 运行中发布制品，普通功能分支 push 不可发布 APK。
+- **Regression suite**：保留当前生肖历史补齐/防未来数据、通知、AI button、激活码修复和安全测试。目前暂停 APK 开发，常规 CI 只验证后端和网页；Flutter 分析、测试和 APK 发布仅保留显式手动工作流，分支、PR、tag 均不自动构建 APK。
 
 ### 发布前必须满足
 
