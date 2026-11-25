@@ -400,6 +400,7 @@ function shouldShowNormalNumbers() {
 
 function getStrategyLabel(strategy) {
     const labels = {
+        zodiac_rebound: '生肖遗漏回补',
         hot: '热门预测',
         cold: '冷门预测',
         trend: '走势预测',
@@ -772,6 +773,17 @@ function displayPrediction(data, strategy) {
     </div>`;
     
     const showReferenceNumbers = shouldShowNormalNumbers();
+
+    // Render the primary zodiac result even when reference numbers are hidden.
+    const zodiacAnalysis = (data.model_meta || {}).zodiac_rebound;
+    if (zodiacAnalysis) {
+        const safeZodiacs = values => (Array.isArray(values) ? values : [])
+            .filter(value => /^[鼠牛虎兔龙蛇马羊猴鸡狗猪]$/.test(value)).join(' · ');
+        html += `<div style="padding:16px; margin-bottom:16px; border:1px solid rgba(148,163,184,.25); border-radius:10px; color:#f8fafc; text-align:center;">
+            <div>综合六肖</div><div style="font-size:1.3rem; font-weight:700; margin:8px 0 16px;">${safeZodiacs(zodiacAnalysis.six_zodiacs)}</div>
+            <div>精选四肖</div><div style="font-size:1.3rem; font-weight:700; margin-top:8px;">${safeZodiacs(zodiacAnalysis.four_zodiacs)}</div>
+        </div>`;
+    }
 
     // 显示平码/六码参考
     if (showReferenceNumbers && data.normal && data.normal.length > 0) {

@@ -43,6 +43,7 @@ class PredictionItem {
     required this.actualSpecialZodiac,
     required this.result,
     required this.createdAt,
+    this.zodiacGroups = const {},
   });
 
   final int id;
@@ -57,6 +58,7 @@ class PredictionItem {
   final String actualSpecialZodiac;
   final String result;
   final DateTime? createdAt;
+  final Map<String, dynamic> zodiacGroups;
 
   factory PredictionItem.fromJson(Map<String, dynamic> json) {
     return PredictionItem(
@@ -75,6 +77,7 @@ class PredictionItem {
       actualSpecialNumber: json['actual_special_number'] as String? ?? '',
       actualSpecialZodiac: json['actual_special_zodiac'] as String? ?? '',
       result: json['result'] as String? ?? 'pending',
+      zodiacGroups: Map<String, dynamic>.from(json['zodiac_groups'] as Map? ?? {}),
       createdAt: json['created_at'] == null
           ? null
           : DateTime.tryParse(json['created_at'] as String),

@@ -364,6 +364,25 @@ class PredictionRecord(db.Model):
 
     prediction_metadata = db.Column(LargeText)
 
+    @property
+    def zodiac_groups(self):
+        """Persisted six/four-zodiac selections and their own settlement status."""
+        if self.strategy != 'zodiac_rebound':
+            return {}
+        try:
+            analysis = json.loads(self.prediction_metadata or '{}').get('zodiac_rebound', {})
+            selections = {size: [z for z in analysis.get(f'{size}_zodiacs', [])
+                                 if z in tuple('鼠牛虎兔龙蛇马羊猴鸡狗猪')]
+                          for size in ('six', 'four')}
+        except (TypeError, ValueError, AttributeError):
+            return {}
+        if not selections['six'] or not selections['four']:
+            return {}
+        actual = str(self.actual_special_zodiac or '').strip().translate(str.maketrans('龍馬雞豬', '龙马鸡猪'))
+        settled = self.is_result_updated and actual in tuple('鼠牛虎兔龙蛇马羊猴鸡狗猪')
+        return {f'{size}_{field}': value for size, selected in selections.items()
+                for field, value in (('zodiacs', selected), ('hit', actual in selected if settled else None))}
+
     def __repr__(self):
         return f'<PredictionRecord {self.region}-{self.period}>'
 

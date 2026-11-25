@@ -48,6 +48,7 @@ from activation_code_routes import activation_code_bp
 from invite_routes import invite_bp
 from api_mobile import mobile_api_bp
 from notification_service import notify_user, dispatch_notification
+from zodiac_rebound import build_prediction as build_zodiac_prediction, evaluate_groups, summarize_groups
 
 # --- 配置信息 ---
 data_dir = os.path.join(os.getcwd(), 'data')
@@ -1228,6 +1229,7 @@ def _describe_database_target(database_uri):
     return backend or "unknown", database_name
 
 STRATEGY_LABELS = {
+    'zodiac_rebound': '生肖遗漏回补',
     'ml': '机器学习预测',
     'markov': '马尔科夫预测',
     'balanced': '均衡预测',
@@ -1239,6 +1241,7 @@ STRATEGY_LABELS = {
 }
 
 STRATEGY_ICON_MAP = {
+    'zodiac_rebound': 'paw',
     'hot': 'fire',
     'cold': 'snowflake',
     'trend': 'chart-line',
@@ -1260,6 +1263,8 @@ def _build_prediction_display_copy(requested_strategy=None, resolved_strategy=No
         analysis_title = "机器学习分析"
     elif strategy_key == "ai":
         analysis_title = "AI分析"
+    elif strategy_key == "zodiac_rebound":
+        analysis_title = "六肖 / 四肖筛选依据"
     else:
         analysis_title = "分析说明"
     return {
@@ -1267,7 +1272,7 @@ def _build_prediction_display_copy(requested_strategy=None, resolved_strategy=No
         "strategy_icon": STRATEGY_ICON_MAP.get(strategy_key, "dice"),
         "analysis_title": analysis_title,
         "normal_numbers_title": "平码参考",
-        "special_number_title": "特码",
+        "special_number_title": "代表号码" if strategy_key == "zodiac_rebound" else "特码",
         "special_focus_title": "本期主推特码",
         "special_focus_hint": "重点参考号码",
     }
@@ -1615,6 +1620,8 @@ def _load_used_special_numbers(user_id, region, period, exclude_strategy=None):
 
 
 def _refresh_special_recommendation_text(strategy, recommendation_text, special_number, normal_numbers, region=None):
+    if strategy == "zodiac_rebound":
+        return recommendation_text
     if strategy == "ai":
         return _compose_ai_recommendation_text(
             recommendation_text,
@@ -1683,6 +1690,10 @@ def _ensure_period_unique_special(
 
     zodiac_year = prediction_zodiac_year or datetime.now().year
     zodiac_map = _get_number_to_zodiac_map(zodiac_year)
+    if strategy == "zodiac_rebound":
+        zodiac_map = {str(number): row["zodiac"]
+                      for row in (model_meta.get("zodiac_rebound") or {}).get("statistics", [])
+                      for number in row["numbers"]}
     result["special"] = {
         "number": str(replacement),
         "sno_zodiac": zodiac_map.get(str(replacement), ""),
@@ -1859,6 +1870,43 @@ def _prediction_notice_card_html(title, normal_numbers, special_number, special_
     '''
 
 
+def _prediction_notice_zodiac_groups(prediction):
+    """Use the selections saved with this prediction, never recompute history."""
+    if getattr(prediction, 'strategy', '') != 'zodiac_rebound':
+        return {}
+    metadata = _deserialize_prediction_metadata(getattr(prediction, 'prediction_metadata', ''))
+    analysis = metadata.get('zodiac_rebound') if isinstance(metadata, dict) else None
+    if not isinstance(analysis, dict):
+        return {}
+    groups = {}
+    for size, count in (('six', 6), ('four', 4)):
+        raw = analysis.get(f'{size}_zodiacs')
+        if not isinstance(raw, list) or len(raw) != count or len(set(map(str, raw))) != count:
+            return {}
+        if any(not isinstance(zodiac, str) or zodiac not in tuple('鼠牛虎兔龙蛇马羊猴鸡狗猪') for zodiac in raw):
+            return {}
+        groups[f'{size}_zodiacs'] = raw
+    if not set(groups['four_zodiacs']).issubset(groups['six_zodiacs']):
+        return {}
+    return groups
+
+
+def _prediction_notice_zodiac_card_html(title, groups, accent='#93c5fd'):
+    rows = ''.join(
+        f'<div style="margin:6px 0;color:#0f172a;">{label}：'
+        f'<strong>{escape("、".join(groups[f"{size}_zodiacs"]))}</strong></div>'
+        for size, label in (('six', '综合六肖'), ('four', '精选四肖'))
+    )
+    return f'''
+    <div class="notice-prediction-card" style="padding:14px 0;border-bottom:1px solid rgba(148,163,184,.18);">
+        <div class="notice-card-title" style="font-weight:800;color:{accent};font-size:15px;margin-bottom:8px;">{escape(title)}</div>
+        <div style="background:#f8fafc;padding:12px;border:1px solid #e2e8f0;border-radius:8px;">
+            {rows}
+        </div>
+    </div>
+    '''
+
+
 def _prediction_notice_email_style():
     return '''
     <style>
@@ -1999,6 +2047,9 @@ def _prediction_notice_wrapper_html(title, intro, body_html, footer_note='', ton
     '''
 
 LOCAL_STRATEGY_KEYS = ["hot", "cold", "trend", "hybrid", "balanced", "markov", "ml"]
+# Fixed zodiac rules can be selected for automatic predictions, but do not
+# participate in number-strategy tuning or change the ML ensemble.
+AUTO_PREDICTION_STRATEGY_KEYS = LOCAL_STRATEGY_KEYS + ["zodiac_rebound"]
 _draws_api_cache_lock = threading.Lock()
 _draws_api_cache = {}
 _DRAWS_API_CACHE_TTL = 60
@@ -2378,7 +2429,7 @@ def cleanup_legacy_smart_strategy():
             default_strategies = ",".join(LOCAL_STRATEGY_KEYS)
             for user in users:
                 raw = str(user.auto_prediction_strategies or "").strip()
-                parts = [part.strip() for part in raw.split(",") if part.strip() in LOCAL_STRATEGY_KEYS]
+                parts = [part.strip() for part in raw.split(",") if part.strip() in AUTO_PREDICTION_STRATEGY_KEYS]
                 user.auto_prediction_strategies = ",".join(parts) if parts else default_strategies
             db.session.commit()
         except Exception as e:
@@ -2427,6 +2478,9 @@ if _should_log_startup():
 # 香港数据API
 HK_DATA_SOURCE_URL = "https://api3.marksix6.net/lottery_api.php?type=hk"
 HK_NEXT_DRAW_TIME_URL = "https://api3.marksix6.net/"
+HK_HISTORY_DRAW_LIMIT = 60
+_hk_history_backfill_lock = threading.Lock()
+_hk_history_backfill_retry_after = 0.0
 
 # 香港赛马会官方数据源（bet.hkjc.com/ch/marksix/home 页面背后的 GraphQL 接口）
 HKJC_GRAPHQL_URL = os.environ.get(
@@ -2744,6 +2798,8 @@ def _normalize_hkjc_draw_record(record):
     except (TypeError, ValueError):
         return None
     all_numbers = numbers + [special]
+    if len(set(all_numbers)) != 7 or any(not 1 <= int(n) <= 49 for n in all_numbers):
+        return None
     wave = ",".join(_hkjc_number_color(n) for n in all_numbers) or ""
     draw_date = _parse_hkjc_date_part(record.get("drawDate"))
     return {
@@ -2808,14 +2864,14 @@ def _hkjc_graph_post(operation_name, variables):
     _hk_log(f"官方接口HTTP 200 耗时{elapsed_ms}ms op={operation_name}")
     return body.get("data") or {}
 
-def fetch_hk_results_from_hkjc(limit=12):
+def fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT):
     """从香港赛马会官方 GraphQL 接口拉取最近 N 期开奖结果；失败返回 []"""
     try:
         data = _hkjc_graph_post(
             "marksixResult",
             {"lastNDraw": int(limit), "startDate": None, "endDate": None, "drawType": "All"},
         )
-        draws = (data.get("lotteryDraws")) or []
+        draws = (data or {}).get("lotteryDraws") or []
         normalized = []
         for record in draws:
             if str(record.get("status", "")).lower() != "result":
@@ -3378,7 +3434,7 @@ def settle_pending_manual_bets(region, draw_id):
 def load_hk_data(force_refresh=False):
     """香港开奖数据：香港赛马会官方接口为增量权威来源，旧接口兜底，合并去重"""
     # 官方权威数据（最近 N 期，能反映停办/加场等官方调整），作为增量来源
-    official_data = fetch_hk_results_from_hkjc(limit=12)
+    official_data = fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT)
     _hk_log(f"官方数据源返回开奖记录: {len(official_data)} 条")
     _hk_log(f"旧接口拉全量历史 url={HK_DATA_SOURCE_URL}")
     try:
@@ -3397,7 +3453,7 @@ def load_hk_data(force_refresh=False):
             pass
         else:
             _hk_log(f"旧接口返回格式错误: {str(api_data)[:200]}")
-            return []
+            return official_data
         
         for record in api_data:
             raw_numbers_str = record.get("openCode", "").split(',')
@@ -4149,6 +4205,8 @@ def _strategy_backtest_min_history(strategy, region=None, configured_minimum=Non
     weak (and made parameter searches chase that artefact).
     """
     base = max(1, int(configured_minimum or 10))
+    if strategy == "zodiac_rebound":
+        return max(base, 20)
     config = _load_strategy_config(strategy, region or "hk") if strategy else {}
     # Only the shape of the configured window matters here.  Region-specific
     # values can be supplied by callers that use an override; these caps keep
@@ -10116,8 +10174,100 @@ def _predict_with_ml(data, region, variation_key=None):
         "model_meta": model_meta,
     }
 
+def _ensure_zodiac_prediction_history(data, region):
+    """Backfill missing HK history without moving the prediction's cutoff.
+
+    Backtests must use exactly their supplied training slice. Live requests can
+    use older DB draws (including the previous lunar year), then the official
+    source. Only missing, completed draws are persisted; existing draws and
+    already generated predictions are never rewritten here.
+    """
+    global _hk_history_backfill_retry_after
+    if (not data or region != "hk" or _backtest_strict_strategy_enabled()
+            or _current_backtest_cutoff_period()):
+        return data
+    primary = _merge_draw_history_desc(data)
+    if len(primary) >= 20:
+        return data
+    latest = primary[0] if primary else None
+    if not latest:
+        return data
+    cutoff_date = str(latest.get("date") or "")[:10]
+    next_date = (datetime.strptime(cutoff_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    cutoff_period = _period_sort_key(latest.get("id"))
+
+    def eligible(draws):
+        return [draw for draw in draws
+                if str(draw.get("date") or "")[:10] <= cutoff_date
+                and _period_sort_key(draw.get("id")) <= cutoff_period]
+
+    def local_history():
+        records = (LotteryDraw.query.filter_by(region="hk")
+                   .filter(LotteryDraw.draw_date < next_date)
+                   .order_by(LotteryDraw.draw_date.desc(), LotteryDraw.draw_id.desc())
+                   .limit(HK_HISTORY_DRAW_LIMIT).all())
+        return _merge_draw_history_desc(primary, eligible([r.to_dict() for r in records]))
+
+    history = local_history()
+    if len(history) >= 20:
+        return history
+    with _hk_history_backfill_lock:
+        # Another request may have filled the database while we waited.
+        history = local_history()
+        if len(history) >= 20 or time.monotonic() < _hk_history_backfill_retry_after:
+            return history
+        _hk_history_backfill_retry_after = time.monotonic() + 300
+        official = eligible(fetch_hk_results_from_hkjc(limit=HK_HISTORY_DRAW_LIMIT))
+        known = {str(draw.get("id")) for draw in history}
+        # The source can include older draws outside our local query limit.
+        # Check those too so a history fill cannot overwrite an imported draw.
+        if official:
+            known.update(row.draw_id for row in LotteryDraw.query.filter_by(region="hk").filter(
+                LotteryDraw.draw_id.in_([str(draw["id"]) for draw in official])
+            ).all())
+        inserted = 0
+        for draw in official:
+            if str(draw.get("id")) not in known:
+                if LotteryDraw.save_draw("hk", draw):
+                    known.add(str(draw["id"]))
+                    inserted += 1
+        if inserted:
+            _clear_draw_dependent_caches("hk")
+        history = local_history()
+        _hk_log(f"预测历史补齐：新增 {inserted} 期，可用 {len(history)} 期")
+        return history
+
+
+def _predict_zodiac_rebound(data, region):
+    from models import ZodiacSetting
+
+    try:
+        mappings = {}
+
+        def mapping_for_draw(draw):
+            year = ZodiacSetting.get_zodiac_year_for_date(draw.get("date"))
+            if year not in mappings:
+                mappings[year] = _get_number_to_zodiac_map(year)
+            return mappings[year]
+
+        if not data:
+            raise ValueError("生肖遗漏回补需要至少 20 期完整开奖记录")
+        data = _ensure_zodiac_prediction_history(data, region)
+        latest = max(data, key=_backtest_draw_sort_key)
+        return build_zodiac_prediction(data, mapping_for_draw(latest), mapping_for_draw)
+    except ValueError as exc:
+        if _backtest_strict_strategy_enabled():
+            raise
+        message = str(exc)
+        if region == "hk" and "至少 20" in message:
+            message += "。这是历史数据不足，无需等待新开奖；请在后台「香港开奖数据导入」补充历史后重试。"
+        return {"error": message, "error_type": "invalid_zodiac_history"}
+
+
 def get_local_recommendations(strategy, data, region, variation_key=None):
     all_numbers = list(range(1, 50))
+    if strategy == 'zodiac_rebound':
+        return _predict_zodiac_rebound(data, region)
     if not data:
         return _build_default_baseline_prediction()
     elif strategy == 'ml':
@@ -13057,6 +13207,14 @@ def _load_backtest_draws_from_db(region, limit=AUTO_BACKTEST_LIMIT):
     return _normalize_backtest_draws(records, limit=limit)
 
 
+def _evaluate_zodiac_groups(result, draw):
+    if not (result.get("model_meta") or {}).get("zodiac_rebound"):
+        return {}
+    from models import ZodiacSetting
+    year = ZodiacSetting.get_zodiac_year_for_date(draw.get("date"))
+    return evaluate_groups(result, draw, _get_number_to_zodiac_map(year))
+
+
 def _evaluate_backtest_prediction(result, draw):
     actual_special = _normalize_draw_number(draw.get("sno"))
     actual_zodiac = str(draw.get("sno_zodiac") or "").strip()
@@ -13073,6 +13231,7 @@ def _evaluate_backtest_prediction(result, draw):
         "zodiac_hit": bool(actual_zodiac and predicted_zodiac and actual_zodiac == predicted_zodiac),
         "predicted_special": predicted_special,
         "actual_special": actual_special,
+        **_evaluate_zodiac_groups(result, draw),
     }
 
 
@@ -13129,6 +13288,7 @@ def _summarize_backtest_entries(entries):
     zodiac = sum(1 for item in entries if item.get("zodiac_hit"))
     return {
         "total": total,
+        **summarize_groups(entries),
         "top1_hit_rate": round(top1 / total * 100, 2),
         "top6_hit_rate": round(top6 / total * 100, 2),
         "zodiac_hit_rate": round(zodiac / total * 100, 2),
@@ -14118,6 +14278,7 @@ WINNING_SNAPSHOT_FIELDS = (
     'special_zodiac',
     'actual_special_number',
     'actual_special_zodiac',
+    'prediction_metadata',
 )
 
 
@@ -14290,7 +14451,7 @@ def generate_auto_predictions(data, region):
 
         for user in auto_predict_users:
             strategies = user.auto_prediction_strategies.split(',') if user.auto_prediction_strategies else list(LOCAL_STRATEGY_KEYS)
-            strategies = [strategy for strategy in strategies if strategy in LOCAL_STRATEGY_KEYS]
+            strategies = [strategy for strategy in strategies if strategy in AUTO_PREDICTION_STRATEGY_KEYS]
             if not strategies:
                 strategies = list(LOCAL_STRATEGY_KEYS)
             regions = user.auto_prediction_regions.split(',') if hasattr(user, 'auto_prediction_regions') and user.auto_prediction_regions else ['hk', 'macau']
@@ -15418,6 +15579,22 @@ def send_combined_prediction_email(user, predictions, region, period, latest_dra
     text_rows = []
     for pred in predictions:
         strategy_name = _get_email_strategy_display(pred)
+        groups = _prediction_notice_zodiac_groups(pred)
+        if getattr(pred, 'strategy', '') == 'zodiac_rebound':
+            if groups:
+                text_rows.append(
+                    f"{strategy_name}:\n综合六肖：{'、'.join(groups['six_zodiacs'])}\n"
+                    f"精选四肖：{'、'.join(groups['four_zodiacs'])}"
+                )
+                cards_html += _prediction_notice_zodiac_card_html(strategy_name, groups)
+            else:
+                text_rows.append(f"{strategy_name}: 该历史记录未保存完整六肖、四肖，无法展示组合。")
+                cards_html += (
+                    '<div class="notice-prediction-card" style="padding:14px 0;">'
+                    f'<strong>{escape(strategy_name)}</strong>'
+                    '<p>该历史记录未保存完整六肖、四肖，无法展示组合。</p></div>'
+                )
+            continue
         if show_normal_numbers:
             text_rows.append(
                 f"{strategy_name}: 平码 {pred.normal_numbers}; 特码 {pred.special_number} ({pred.special_zodiac})"
@@ -15496,6 +15673,15 @@ def send_combined_winning_email(user, predictions, region, draw_data=None):
     text_rows = []
     for pred in predictions:
         strategy_name = _get_email_strategy_display(pred)
+        groups = _prediction_notice_zodiac_groups(pred)
+        if groups:
+            text_rows.append(
+                f"{strategy_name}: 代表号码命中特码 {pred.special_number} ({pred.special_zodiac})；"
+                f"综合六肖：{'、'.join(groups['six_zodiacs'])}；"
+                f"精选四肖：{'、'.join(groups['four_zodiacs'])}"
+            )
+            cards_html += _prediction_notice_zodiac_card_html(strategy_name, groups, accent='#16a34a')
+            continue
         text_rows.append(f"{strategy_name}: 命中特码 {pred.special_number} ({pred.special_zodiac})")
         cards_html += _prediction_notice_card_html(
             strategy_name,

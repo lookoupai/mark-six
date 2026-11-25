@@ -3,7 +3,9 @@
 {% block page_title %}预测记录{% endblock %}
 
 {% macro strategy_badge(strategy) -%}
-    {% if strategy == 'hot' %}
+    {% if strategy == 'zodiac_rebound' %}
+        🐾 生肖遗漏回补
+    {% elif strategy == 'hot' %}
         🔥 热门预测
     {% elif strategy == 'cold' %}
         🧊 冷门预测
@@ -24,6 +26,22 @@
     {% endif %}
 {%- endmacro %}
 
+{% macro zodiac_group_summary(prediction) -%}
+{% set groups = prediction.zodiac_groups %}
+{% if groups %}
+<div style="margin: 0.6rem 0; line-height: 1.8;">
+    {% for size, label in [('six', '综合六肖'), ('four', '精选四肖')] %}
+    <div>{{ label }}：<strong>{{ groups[size ~ '_zodiacs']|join('、') }}</strong>
+        {% if groups[size ~ '_hit'] is not none %}
+        <span>{{ '✓ 命中' if groups[size ~ '_hit'] else '未命中' }}</span>
+        {% endif %}
+    </div>
+    {% endfor %}
+    <small>下方号码及通用统计为代表号码口径</small>
+</div>
+{% endif %}
+{%- endmacro %}
+
 {% macro render_prediction_card(prediction, inline_special_only=False) -%}
 <div class="prediction-card-compact{% if inline_special_only %} inline-special-only{% endif %}">
     <div class="prediction-left">
@@ -32,6 +50,7 @@
             <span class="strategy-badge-compact strategy-{{ prediction.strategy }}">{{ strategy_badge(prediction.strategy) }}</span>
         </div>
         <div class="prediction-numbers-compact{% if inline_special_only %} special-only-numbers{% endif %}">
+            {{ zodiac_group_summary(prediction) }}
             {% if user.show_normal_numbers %}
             {% for num in prediction.normal_numbers.split(',') if prediction.normal_numbers %}
             {% set color = get_number_color(num) %}
@@ -160,6 +179,7 @@
                 <span class="strategy-time-mini">{{ prediction.created_at.strftime('%m-%d %H:%M') }}</span>
             </div>
 
+            {{ zodiac_group_summary(prediction) }}
             <div class="strategy-special-row">
                 {% set special_color = get_number_color(prediction.special_number) %}
                 <div class="number-ball-compact ball-{{ special_color }} special-ball-compact">
@@ -315,6 +335,7 @@
                     <option value="hot" {% if request.args.get('strategy') == 'hot' %}selected{% endif %}>热门预测</option>
                     <option value="cold" {% if request.args.get('strategy') == 'cold' %}selected{% endif %}>冷门预测</option>
                     <option value="trend" {% if request.args.get('strategy') == 'trend' %}selected{% endif %}>走势预测</option>
+                    <option value="zodiac_rebound" {% if request.args.get('strategy') == 'zodiac_rebound' %}selected{% endif %}>生肖遗漏回补</option>
                     <option value="hybrid" {% if request.args.get('strategy') == 'hybrid' %}selected{% endif %}>综合预测</option>
                     <option value="balanced" {% if request.args.get('strategy') == 'balanced' %}selected{% endif %}>均衡预测</option>
                     <option value="markov" {% if request.args.get('strategy') == 'markov' %}selected{% endif %}>马尔科夫预测</option>
